@@ -1,7 +1,7 @@
 {
   "name": "smart-music-library",
   "version": "1.0.0",
-  "description": "A React + Express Spotify/YouTube Music integration app with authentication, playlist viewing, and library search",
+  "description": "A React + Express YouTube Music library manager with authentication, playlist analysis, and library search",
   "private": true,
   "packageManager": "pnpm@10.33.0",
   "scripts": {
@@ -19,7 +19,8 @@
     "lint:frontend": "pnpm --filter frontend lint",
     "lint:shared": "pnpm --filter shared lint",
     "lint:fix": "pnpm --filter shared lint:fix && pnpm --filter frontend lint:fix && pnpm --filter backend lint:fix",
-    "install:all": "pnpm install"
+    "install:all": "pnpm install",
+    "test": "pnpm --filter shared test && pnpm --filter shared build && pnpm --filter backend test"
   },
   "devDependencies": {
     "@eslint/js": "^9.38.0",

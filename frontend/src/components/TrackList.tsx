@@ -20,9 +20,8 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useAuth } from "../contexts/AuthContext";
 import { useSettings } from "../contexts/SettingsContext";
-import { baseAPI } from "../services/api";
+import { baseAPI, getApiErrorMessage } from "../services/api";
 import {
   formatDuration,
   getListenUrl,
@@ -60,7 +59,15 @@ export function TrackList({
   );
   const queryClient = useQueryClient();
   const { enabledServices } = useSettings();
-  const { source } = useAuth();
+  // YouTube tracks carry a placeholder "album" (just the video thumbnail),
+  // so the Album column only earns its place when real albums exist.
+  const hasRealAlbums = useMemo(
+    () =>
+      [...tracks, ...(aggregatedTracks ?? []).map((r) => r.track)].some(
+        (t) => !!t.album?.id && t.album.type !== "youtube",
+      ),
+    [tracks, aggregatedTracks],
+  );
 
   const unlikeTrackMutation = useMutation({
     mutationFn: async (trackId: string) => {
@@ -70,6 +77,11 @@ export function TrackList({
       // Invalidate queries to refresh data
       queryClient.invalidateQueries({ queryKey: ["saved-tracks"] });
       queryClient.invalidateQueries({ queryKey: ["aggregated-liked-songs"] });
+    },
+    onError: (error) => {
+      window.alert(
+        getApiErrorMessage(error, "Failed to remove track from Liked Songs"),
+      );
     },
   });
 
@@ -193,8 +205,8 @@ export function TrackList({
     },
     // YouTube Music has no real album metadata (tracks are grouped by
     // channel, which is already shown as the artist), so the column would
-    // just repeat the artist name — only show it for Spotify.
-    ...(source === "spotify"
+    // just repeat the artist name — only show it when real albums exist.
+    ...(hasRealAlbums
       ? [
           {
             id: "album",
@@ -266,7 +278,7 @@ export function TrackList({
         return (
           <Tooltip content="Listen">
             <a
-              href={getListenUrl(source, row.original.track.id)}
+              href={getListenUrl(row.original.track.id)}
               target="_blank"
               rel="noopener noreferrer"
               className="btn btn-ghost btn-xs btn-circle p-0.5"

@@ -1,16 +1,21 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import {
-  convertFromSpotifyTrack,
+  Artist,
   Playlist,
   Track,
   TrackOwnership,
 } from "@smart-music-library/shared";
 import { Job } from "bullmq";
-import { RedisService, SpotifyService, YouTubeService } from "../services";
-import type { MusicSource } from "../services/RedisService";
+import { getErrorStatus } from "../lib/retry";
+import {
+  LIKED_SONGS_PLAYLIST_ID,
+  MusicSource,
+  RedisService,
+} from "../services/RedisService";
 import {
   convertYouTubeThumbnails,
   YOUTUBE_MUSIC_CATEGORY_ID,
+  YouTubeService,
+  YouTubeVideo,
 } from "../services/YouTubeService";
 
 // YouTube's API has no concept of "YouTube Music" playlists distinct from
@@ -22,7 +27,11 @@ import {
 // the official Data API exposes.
 const MIN_MUSIC_RATIO = 0.5;
 
-enum JobProgressPercentage {
+// Playlist-level errors that mean "this one playlist can't be read" (deleted,
+// private, region-locked...) rather than "the whole sync is broken".
+const SKIPPABLE_PLAYLIST_STATUSES = new Set([403, 404]);
+
+export enum JobProgressPercentage {
   START = 0,
   USER_INFO_STORED = 5,
   PLAYLISTS_STORED = 25,
@@ -42,18 +51,17 @@ export function getPersistJobStatusMessage(progress: number): string {
   if (progress === JobProgressPercentage.START) {
     return "Job started...";
   } else if (progress < JobProgressPercentage.PLAYLISTS_STORED) {
-    return "Storing user info...";
+    return "Fetching liked songs...";
   } else if (progress < JobProgressPercentage.TRACKS_STORED) {
     return "Storing playlists...";
   } else if (progress < JobProgressPercentage.ARTISTS_STORED) {
-    return "Storing tracks...";
-  } else if (progress < JobProgressPercentage.COMPLETED) {
     return "Storing artists...";
+  } else if (progress < JobProgressPercentage.COMPLETED) {
+    return "Finalizing...";
   } else if (progress === JobProgressPercentage.COMPLETED) {
     return "Data persistence completed.";
-  } else {
-    return "Unknown progress state.";
   }
+  return "Unknown progress state.";
 }
 
 function calculateProgress({
@@ -67,235 +75,144 @@ function calculateProgress({
   startPercent: number;
   endPercent: number;
 }): number {
+  if (totalSteps <= 0) return endPercent;
   return Math.round(
     startPercent +
       ((currentStep + 1) / totalSteps) * (endPercent - startPercent),
   );
 }
 
-async function syncSpotify(
-  accessToken: string,
-  refreshToken: string | undefined,
-  userId: string,
-  job: Job<PersistJobData>,
-): Promise<void> {
-  const spotifyService = new SpotifyService(accessToken);
-  const redisService = new RedisService("spotify");
-
-  const refreshAccessToken = async () => {
-    if (!refreshToken) return;
-    const { accessToken: newToken } =
-      await spotifyService.refreshAccessToken(refreshToken);
-    spotifyService.setAccessToken(newToken);
+export function videoToTrack(v: YouTubeVideo): Track {
+  const artistName = v.channelTitle.replace(/ - Topic$/, "");
+  return {
+    id: v.id,
+    name: v.title,
+    uri: `youtube:video:${v.id}`,
+    durationMs: v.durationMs,
+    explicit: false,
+    popularity: v.viewCount ?? 0,
+    previewUrl: null,
+    trackNumber: 0,
+    discNumber: 0,
+    externalUrls: {
+      spotify: `https://www.youtube.com/watch?v=${v.id}`,
+    },
+    artistIds: [v.channelId],
+    artistNames: [artistName],
+    album: {
+      // Unique per video, not per channel: each YouTube video has its own
+      // thumbnail, and this "album" only exists to carry that thumbnail.
+      // Reusing the channel id here would collide across every track from
+      // the same artist (see RedisService.storeTracks' album dedupe).
+      id: `${v.channelId}:${v.id}`,
+      name: artistName,
+      type: "youtube",
+      releaseDate: v.publishedAt?.slice(0, 10),
+      images: convertYouTubeThumbnails(v.thumbnails),
+      externalUrls: {
+        spotify: `https://www.youtube.com/channel/${v.channelId}`,
+      },
+    },
+    // Ownership is a user annotation stored separately; never written here.
+    ownership: TrackOwnership.NOT_OWNED,
   };
-
-  const withAutoRefresh = async <T>(fn: () => Promise<T>): Promise<T> => {
-    try {
-      return await fn();
-    } catch (error: any) {
-      if (error?.response?.status === 401 && refreshToken) {
-        await refreshAccessToken();
-        return await fn();
-      }
-      throw error;
-    }
-  };
-
-  // Delete old data (Spotify namespace only)
-  await redisService.deleteUserData(userId);
-
-  // Store user info
-  await refreshAccessToken();
-  const user = await withAutoRefresh(() => spotifyService.getCurrentUser());
-  await redisService.storeUser(user);
-  await job.updateProgress(JobProgressPercentage.USER_INFO_STORED);
-
-  // Store playlists
-  const playlists = await withAutoRefresh(() =>
-    spotifyService.getUserOwnedPlaylists(),
-  );
-  await redisService.storePlaylists(userId, playlists);
-
-  // Get saved tracks to store as a special playlist
-  const savedTracksData = await withAutoRefresh(() =>
-    spotifyService.getUserSavedTracks(),
-  );
-  const savedTracks = savedTracksData
-    .filter((item) => item.track && !item.track.is_local)
-    .map((item) => item.track);
-
-  if (savedTracks.length > 0) {
-    // Create a virtual "Liked Songs" playlist
-    const likedSongsPlaylist = {
-      id: "liked-songs",
-      name: "Liked Songs",
-      description: "Your liked songs from Spotify",
-      owner: { id: userId },
-      public: false,
-      collaborative: false,
-      tracks: { total: savedTracks.length },
-      images: [
-        {
-          url: "https://misc.scdn.co/liked-songs/liked-songs-64.png",
-          height: 64,
-          width: 64,
-        },
-      ],
-      external_urls: { spotify: "" },
-      snapshot_id: "",
-    };
-
-    // Store the virtual playlist
-    await redisService.storePlaylists(userId, [likedSongsPlaylist]);
-    // Store the saved tracks under this virtual playlist
-    await redisService.storeTracks(userId, "liked-songs", savedTracks);
-  }
-
-  await job.updateProgress(JobProgressPercentage.PLAYLISTS_STORED);
-
-  // Store tracks
-  const tracks: Track[] = [];
-  const artistIdsSet: Set<string> = new Set();
-
-  // Process regular playlists
-  for (let i = 0; i < playlists.length; i++) {
-    const playlist = playlists[i];
-
-    const playlistTracks = await withAutoRefresh(() =>
-      spotifyService.getPlaylistTracks(playlist.id),
-    );
-
-    const validTracks = playlistTracks
-      .filter((item) => item.track && !item.track.is_local)
-      .map((item) => item.track);
-
-    if (validTracks.length > 0) {
-      await redisService.storeTracks(userId, playlist.id, validTracks);
-
-      validTracks.forEach((track) => {
-        tracks.push(convertFromSpotifyTrack(track));
-        track.artists.forEach((artist) => {
-          artistIdsSet.add(artist.id);
-        });
-      });
-    }
-
-    const progress = calculateProgress({
-      currentStep: i,
-      totalSteps: playlists.length + (savedTracks.length > 0 ? 1 : 0),
-      startPercent: JobProgressPercentage.PLAYLISTS_STORED,
-      endPercent: JobProgressPercentage.TRACKS_STORED,
-    });
-    await job.updateProgress(progress);
-  }
-
-  // Process saved tracks (already stored above, just add to tracking)
-  if (savedTracks.length > 0) {
-    savedTracks.forEach((track) => {
-      tracks.push(convertFromSpotifyTrack(track));
-      track.artists.forEach((artist) => {
-        artistIdsSet.add(artist.id);
-      });
-    });
-
-    const progress = calculateProgress({
-      currentStep: playlists.length,
-      totalSteps: playlists.length + 1,
-      startPercent: JobProgressPercentage.PLAYLISTS_STORED,
-      endPercent: JobProgressPercentage.TRACKS_STORED,
-    });
-    await job.updateProgress(progress);
-  }
-
-  // Store artists
-  const artistIds = Array.from(artistIdsSet);
-  const batchSize = 50;
-
-  for (let i = 0; i < artistIds.length; i += batchSize) {
-    const batch = artistIds.slice(i, i + batchSize);
-    const artists = await withAutoRefresh(() =>
-      spotifyService.getArtists(batch),
-    );
-
-    await redisService.storeArtists(userId, artists);
-
-    const progress = calculateProgress({
-      currentStep: i,
-      totalSteps: artistIds.length,
-      startPercent: JobProgressPercentage.TRACKS_STORED,
-      endPercent: JobProgressPercentage.ARTISTS_STORED,
-    });
-
-    await job.updateProgress(progress);
-  }
-
-  await redisService.setSyncMeta({
-    userId,
-    lastSync: new Date().toISOString(),
-    playlistCount: playlists.length + (savedTracks.length > 0 ? 1 : 0),
-    trackCount: tracks.length,
-    artistCount: artistIds.length,
-  });
-
-  await job.updateProgress(JobProgressPercentage.COMPLETED);
-
-  console.log(
-    `Spotify persistence completed for user ${userId}: ${
-      playlists.length + (savedTracks.length > 0 ? 1 : 0)
-    } playlists (including ${savedTracks.length} saved tracks), ${
-      tracks.length
-    } tracks, ${artistIds.length} artists`,
-  );
 }
 
-async function syncYoutube(
-  accessToken: string,
-  refreshToken: string | undefined,
-  userId: string,
-  job: Job<PersistJobData>,
-) {
-  const redisService = new RedisService("yt-music");
-  await redisService.deleteUserData(userId);
+export interface SyncResult {
+  playlistCount: number;
+  trackCount: number;
+  artistCount: number;
+  skippedPlaylists: number;
+}
 
-  let yt = new YouTubeService({
-    access_token: accessToken,
-    refresh_token: refreshToken,
-  });
-
-  const refreshAccessToken = async () => {
-    if (!refreshToken) return;
-    const tokens = await yt.refreshAccessToken();
-    if (tokens.access_token) {
-      yt = new YouTubeService({
-        access_token: tokens.access_token,
-        refresh_token: refreshToken,
-        expiry_date: tokens.expiry_date ?? undefined,
-      });
-    }
-  };
-
-  const withAutoRefresh = async <T>(fn: () => Promise<T>): Promise<T> => {
-    try {
-      return await fn();
-    } catch (error: any) {
-      if (error?.response?.status === 401 && refreshToken) {
-        await refreshAccessToken();
-        return await fn();
-      }
-      throw error;
-    }
-  };
-
-  const youtubePlaylists = await withAutoRefresh(() => yt.listMyPlaylists());
-
+/**
+ * Builds a complete copy of the user's library in `store` (a fresh, not
+ * yet live, generation). Does not activate it.
+ */
+export async function syncYouTubeLibrary({
+  userId,
+  yt,
+  store,
+  reportProgress,
+}: {
+  userId: string;
+  yt: YouTubeService;
+  store: RedisService;
+  reportProgress: (progress: number) => Promise<void>;
+}): Promise<SyncResult> {
   const uniqueArtists = new Map<string, { id: string; name: string }>();
-  const musicPlaylistsDomain: Playlist[] = [];
-  let totalTracksStored = 0;
+  const trackIds = new Set<string>();
+  const playlists: Playlist[] = [];
+  let skippedPlaylists = 0;
+
+  // Video details are fetched once per sync, not once per playlist they
+  // appear in — saves YouTube API quota for overlapping playlists.
+  const videoCache = new Map<string, YouTubeVideo>();
+  const getVideos = async (ids: string[]): Promise<YouTubeVideo[]> => {
+    const missing = ids.filter((id) => !videoCache.has(id));
+    if (missing.length > 0) {
+      for (const video of await yt.getVideosByIds(missing)) {
+        videoCache.set(video.id, video);
+      }
+    }
+    return ids
+      .map((id) => videoCache.get(id))
+      .filter((v): v is YouTubeVideo => !!v);
+  };
+
+  const collect = (tracks: Track[]) => {
+    for (const track of tracks) {
+      trackIds.add(track.id);
+      track.artistIds.forEach((id, i) =>
+        uniqueArtists.set(id, { id, name: track.artistNames[i] ?? "" }),
+      );
+    }
+  };
+
+  // Liked songs -> virtual "liked-songs" playlist (music videos only).
+  const likedVideos = (await yt.listLikedVideos()).filter(
+    (v) => v.categoryId === YOUTUBE_MUSIC_CATEGORY_ID,
+  );
+  likedVideos.forEach((v) => videoCache.set(v.id, v));
+  const likedTracks = likedVideos.map(videoToTrack);
+  if (likedTracks.length > 0) {
+    playlists.push({
+      id: LIKED_SONGS_PLAYLIST_ID,
+      name: "Liked Songs",
+      description: "Your liked music on YouTube",
+      ownerId: userId,
+      public: false,
+      collaborative: false,
+      trackCount: likedTracks.length,
+      images: likedTracks[0].album.images ?? [],
+      externalUrls: { spotify: "https://music.youtube.com/playlist?list=LM" },
+      snapshotId: "",
+    });
+    await store.storeTracks(LIKED_SONGS_PLAYLIST_ID, likedTracks);
+    collect(likedTracks);
+  }
+  await reportProgress(JobProgressPercentage.USER_INFO_STORED);
+
+  const youtubePlaylists = await yt.listMyPlaylists();
 
   for (let i = 0; i < youtubePlaylists.length; i++) {
     const p = youtubePlaylists[i];
-    const ids = await withAutoRefresh(() => yt.listPlaylistVideoIds(p.id));
-    const videos = await withAutoRefresh(() => yt.getVideosByIds(ids));
+
+    let videos: YouTubeVideo[];
+    try {
+      const ids = await yt.listPlaylistVideoIds(p.id);
+      videos = await getVideos(ids);
+    } catch (err) {
+      const status = getErrorStatus(err);
+      if (status !== undefined && SKIPPABLE_PLAYLIST_STATUSES.has(status)) {
+        console.warn(
+          `Skipping playlist ${p.id} for user ${userId}: HTTP ${status}`,
+        );
+        skippedPlaylists += 1;
+        continue;
+      }
+      throw err;
+    }
 
     const musicRatio =
       videos.length === 0
@@ -304,86 +221,45 @@ async function syncYoutube(
             .length / videos.length;
 
     if (musicRatio >= MIN_MUSIC_RATIO) {
-      musicPlaylistsDomain.push({
+      const tracks = videos.map(videoToTrack);
+      playlists.push({
         id: p.id,
         name: p.title,
         description: p.description,
         ownerId: userId,
         public: false,
         collaborative: false,
-        trackCount: p.itemCount,
+        trackCount: tracks.length,
         images: convertYouTubeThumbnails(p.thumbnails),
         externalUrls: {
           spotify: `https://www.youtube.com/playlist?list=${p.id}`,
         },
         snapshotId: "",
       });
-
-      const tracks: Track[] = videos.map((v) => {
-        const artistName = v.channelTitle.replace(/ - Topic$/, "");
-        uniqueArtists.set(v.channelId, {
-          id: v.channelId,
-          name: artistName,
-        });
-        return {
-          id: v.id,
-          name: v.title,
-          uri: `youtube:video:${v.id}`,
-          durationMs: v.durationMs,
-          explicit: false,
-          popularity: v.viewCount ?? 0,
-          previewUrl: null,
-          trackNumber: 0,
-          discNumber: 0,
-          externalUrls: {
-            spotify: `https://www.youtube.com/watch?v=${v.id}`,
-          },
-          artistIds: [v.channelId],
-          artistNames: [artistName],
-          album: {
-            // Unique per video, not per channel: each YouTube video has its
-            // own thumbnail, and this "album" only exists to carry that
-            // thumbnail. Reusing the channel id here would collide across
-            // every track from the same artist, and the storage layer's
-            // "write album once per id" dedupe (see RedisService.storeTracksDomain)
-            // would then keep only the first video's thumbnail, showing it
-            // on every other track from that channel.
-            id: `${v.channelId}:${v.id}`,
-            name: artistName,
-            type: "youtube",
-            releaseDate: v.publishedAt?.slice(0, 10),
-            images: convertYouTubeThumbnails(v.thumbnails),
-            externalUrls: {
-              spotify: `https://www.youtube.com/channel/${v.channelId}`,
-            },
-          },
-          ownership: TrackOwnership.NOT_OWNED,
-        };
-      });
-
-      await redisService.storeTracksDomain(userId, p.id, tracks);
-      totalTracksStored += tracks.length;
+      await store.storeTracks(p.id, tracks);
+      collect(tracks);
     }
 
-    const progress = calculateProgress({
-      currentStep: i,
-      totalSteps: youtubePlaylists.length + 1,
-      startPercent: JobProgressPercentage.PLAYLISTS_STORED,
-      endPercent: JobProgressPercentage.TRACKS_STORED,
-    });
-    await job.updateProgress(progress);
+    await reportProgress(
+      calculateProgress({
+        currentStep: i,
+        totalSteps: youtubePlaylists.length,
+        startPercent: JobProgressPercentage.PLAYLISTS_STORED,
+        endPercent: JobProgressPercentage.TRACKS_STORED,
+      }),
+    );
   }
 
-  await redisService.storePlaylistsDomain(userId, musicPlaylistsDomain);
+  await store.storePlaylists(playlists);
 
-  // Store artists (channel ids). Genres are unknown for YouTube, store empty.
+  // Artists are channels. Genres are unknown for YouTube, store empty.
   const artistIds = Array.from(uniqueArtists.keys());
-  const channels = await withAutoRefresh(() => yt.getChannelsByIds(artistIds));
+  const channels = await yt.getChannelsByIds(artistIds);
   const channelThumbnails = new Map(
     channels.map((c) => [c.id, c.thumbnails] as const),
   );
 
-  const artistsDomain = Array.from(uniqueArtists.values()).map((a) => ({
+  const artists: Artist[] = Array.from(uniqueArtists.values()).map((a) => ({
     id: a.id,
     name: a.name,
     images: convertYouTubeThumbnails(channelThumbnails.get(a.id)),
@@ -392,43 +268,70 @@ async function syncYoutube(
     genres: [],
   }));
 
-  await redisService.storeArtistsDomain(userId, artistsDomain);
-  await job.updateProgress(JobProgressPercentage.ARTISTS_STORED);
+  await store.storeArtists(artists);
+  await reportProgress(JobProgressPercentage.ARTISTS_STORED);
 
-  await redisService.setSyncMeta({
-    userId,
-    lastSync: new Date().toISOString(),
-    playlistCount: musicPlaylistsDomain.length,
-    trackCount: totalTracksStored,
-    artistCount: artistsDomain.length,
-  });
+  const result: SyncResult = {
+    playlistCount: playlists.length,
+    trackCount: trackIds.size,
+    artistCount: artists.length,
+    skippedPlaylists,
+  };
 
-  await job.updateProgress(JobProgressPercentage.COMPLETED);
-  console.log(
-    `YouTube persistence completed for user ${userId}: ${musicPlaylistsDomain.length} playlists, ${totalTracksStored} tracks, ${artistsDomain.length} artists`,
-  );
+  await store.setSyncMeta({ lastSync: new Date().toISOString(), ...result });
+
+  return result;
 }
+
+export type YouTubeServiceFactory = (
+  data: PersistJobData,
+) => YouTubeService;
+
+const defaultYouTubeFactory: YouTubeServiceFactory = (data) =>
+  // The OAuth2 client refreshes the access token on its own (on expiry or
+  // a 401) when it has a refresh token.
+  new YouTubeService({
+    access_token: data.accessToken,
+    refresh_token: data.refreshToken,
+  });
 
 export async function persistUserDataJob(
   job: Job<PersistJobData>,
-): Promise<void> {
-  const { userId, accessToken, refreshToken, source } = job.data;
+  createYouTubeService: YouTubeServiceFactory = defaultYouTubeFactory,
+): Promise<SyncResult> {
+  const { userId, source } = job.data;
+  if (source !== "yt-music") {
+    throw new Error(`Unsupported music source: ${source}`);
+  }
+
+  // Each attempt builds its own generation; the live library is untouched
+  // until the new one is complete.
+  const generation = `${job.id}-${job.attemptsMade}`;
+  const store = new RedisService(userId, generation, source);
 
   try {
-    // Start job
     await job.updateProgress(JobProgressPercentage.START);
 
-    if (source === "spotify") {
-      return await syncSpotify(accessToken, refreshToken, userId, job);
-    }
+    const result = await syncYouTubeLibrary({
+      userId,
+      yt: createYouTubeService(job.data),
+      store,
+      reportProgress: (progress) => job.updateProgress(progress),
+    });
 
-    if (source === "yt-music") {
-      return await syncYoutube(accessToken, refreshToken, userId, job);
-    }
+    await RedisService.activateGeneration(userId, generation, source);
+    await job.updateProgress(JobProgressPercentage.COMPLETED);
 
-    throw new Error(`Unsupported music source: ${source}`);
-  } catch (error: any) {
-    console.error("Error in persist job:", error);
-    throw new Error(`Persist job failed: ${error.message}`);
+    console.log(
+      `YouTube sync completed for user ${userId}: ${result.playlistCount} playlists, ${result.trackCount} tracks, ${result.artistCount} artists, ${result.skippedPlaylists} skipped`,
+    );
+    return result;
+  } catch (error) {
+    // Discard the partial generation; the previous library stays live.
+    await store.deleteLibraryData().catch((cleanupError) => {
+      console.error("Failed to clean up partial sync data:", cleanupError);
+    });
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Persist job failed: ${message}`);
   }
 }

@@ -1,5 +1,4 @@
 import { createContext, ReactNode, useContext, useEffect, useState } from "react";
-import { useAuth } from "./AuthContext";
 
 export type ColorMode = "light" | "dark" | "system";
 
@@ -25,7 +24,6 @@ interface ThemeContextType {
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const { source } = useAuth();
   const [colorMode, setColorModeState] = useState<ColorMode>(() =>
     getStoredColorMode(),
   );
@@ -48,9 +46,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     document.documentElement.setAttribute(
       "data-theme",
-      isDark ? source : `${source}-light`,
+      isDark ? "youtube" : "youtube-light",
     );
-  }, [source, isDark]);
+  }, [isDark]);
 
   const setColorMode = (mode: ColorMode) => {
     localStorage.setItem(COLOR_MODE_STORAGE_KEY, mode);

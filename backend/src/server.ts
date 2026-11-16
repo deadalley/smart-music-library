@@ -1,78 +1,60 @@
-import cookieParser from "cookie-parser";
-import cors from "cors";
-import dotenv from "dotenv";
-import express from "express";
-import crypto from "crypto";
-import { connectRedis } from "./redis";
-import { indexRouter } from "./routes";
-import { authRouter } from "./routes/auth";
-import { persistRouter } from "./routes/persist";
-import { spotifyRouter } from "./routes/spotify";
+import "dotenv/config";
+import { createApp, resolveCookieSecret } from "./app";
+import { connectRedis, redisClient } from "./redis";
+import { BullService } from "./services";
 
-dotenv.config();
+const PORT = Number(process.env.PORT) || 3001;
+const SHUTDOWN_TIMEOUT_MS = 10_000;
 
-const app = express();
-const PORT = process.env.PORT || 3001;
-
-const clientUrl = process.env.CLIENT_URL || "http://127.0.0.1:5173";
-const isProduction = process.env.NODE_ENV === "production";
-
-// Helps secure cookies work correctly behind proxies in production
-app.set("trust proxy", 1);
-
-app.use(
-  cors({
-    origin: clientUrl,
-    credentials: true,
-  }),
-);
-app.use(express.json());
-app.use(cookieParser());
-
-// Minimal CSRF protection (double-submit cookie):
-// - server sets a readable csrf cookie
-// - client echoes it in X-CSRF-Token for non-GET requests
-app.use((req, res, next) => {
-  const existing = req.cookies?.csrf_token as string | undefined;
-  const csrfToken = existing ?? crypto.randomBytes(32).toString("hex");
-
-  if (!existing) {
-    res.cookie("csrf_token", csrfToken, {
-      httpOnly: false,
-      secure: isProduction,
-      sameSite: "lax",
-      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-    });
-  }
-
-  if (
-    req.method === "GET" ||
-    req.method === "HEAD" ||
-    req.method === "OPTIONS"
-  ) {
-    return next();
-  }
-
-  const headerToken = req.header("x-csrf-token");
-  if (!headerToken || headerToken !== csrfToken) {
-    return res.status(403).json({ error: "Invalid CSRF token" });
-  }
-
-  next();
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason);
 });
 
-app.use("/api/auth", authRouter);
-app.use("/api/spotify", spotifyRouter);
-app.use("/api/persist", persistRouter);
-app.use("/api", indexRouter);
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error);
+  process.exit(1);
+});
 
-// Initialize Redis connection and start server
 const startServer = async () => {
   try {
+    // Validate config before touching any external service.
+    const cookieSecret = resolveCookieSecret();
+
     await connectRedis();
-    app.listen(PORT, () => {
+    const bullService = new BullService();
+    const app = createApp({ bullService, cookieSecret });
+
+    const server = app.listen(PORT, () => {
       console.log(`🚀 Server running on http://127.0.0.1:${PORT}`);
     });
+
+    let shuttingDown = false;
+    const shutdown = async (signal: string) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      console.log(`${signal} received, shutting down...`);
+
+      const forceExit = setTimeout(() => {
+        console.error("Graceful shutdown timed out, forcing exit");
+        process.exit(1);
+      }, SHUTDOWN_TIMEOUT_MS);
+      forceExit.unref();
+
+      try {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        // Lets an in-flight sync job finish its current step; BullMQ
+        // re-queues it as stalled if we're killed before it completes.
+        await bullService.cleanup();
+        await redisClient.quit();
+        process.exit(0);
+      } catch (error) {
+        console.error("Error during shutdown:", error);
+        process.exit(1);
+      }
+    };
+
+    process.on("SIGTERM", () => void shutdown("SIGTERM"));
+    process.on("SIGINT", () => void shutdown("SIGINT"));
   } catch (error) {
     console.error("Failed to start server:", error);
     process.exit(1);

@@ -1,19 +1,15 @@
 import {
   Album,
+  AppUser,
   Artist,
   LibrarySearchResult,
   PersistResponse,
   Playlist,
   PlaylistAnalysisResult,
-  SpotifyArtistsResponse,
-  SpotifyPlaylist,
-  SpotifyPlaylistsResponse,
-  SpotifyPlaylistTracksResponse,
   Track,
   TrackAggregationResult,
 } from "@smart-music-library/shared";
 import axios from "axios";
-import type { AuthSource } from "../contexts/AuthContext";
 
 const api = axios.create({
   baseURL: "/api",
@@ -42,71 +38,62 @@ api.interceptors.request.use((config) => {
 
 // Auth endpoints
 export const authAPI = {
-  login: (source: AuthSource) => {
-    window.location.href =
-      source === "youtube"
-        ? "/api/auth/youtube/login"
-        : "/api/auth/spotify/login";
+  login: () => {
+    window.location.href = "/api/auth/youtube/login";
   },
-  logout: (source: AuthSource) =>
-    api.post(
-      source === "youtube" ? "/auth/youtube/logout" : "/auth/spotify/logout",
-    ),
-  // User
-  getUser: () => api.get("/auth/me"),
-  refreshToken: (source: AuthSource) =>
-    api.post(
-      source === "youtube" ? "/auth/youtube/refresh" : "/auth/spotify/refresh",
-    ),
+  logout: () => api.post("/auth/youtube/logout"),
+  getUser: () => api.get<AppUser>("/auth/me"),
 };
 
-// Spotify endpoints
-export const spotifyAPI = {
-  // Playlists
-  getPlaylists: (offset = 0) =>
-    api.get<SpotifyPlaylistsResponse>(`/spotify/playlists?offset=${offset}`),
-
-  getPlaylist: (playlistId: string) =>
-    api.get<SpotifyPlaylist>(`/spotify/playlists/${playlistId}`),
-
-  getPlaylistTracks: (playlistId: string, offset = 0) =>
-    api.get<SpotifyPlaylistTracksResponse>(
-      `/spotify/playlists/${playlistId}/tracks?offset=${offset}`,
-    ),
-
-  addTrackToPlaylist: (playlistId: string, trackId: string) =>
-    api.post(`/spotify/playlists/${playlistId}/tracks`, { trackId }),
-
-  // Artists
-  getArtists: () => api.get<SpotifyArtistsResponse>(`/spotify/artists`),
-  getArtistTracks: (artistId: string) =>
-    api.get<SpotifyPlaylistTracksResponse>(
-      `/spotify/artists/${artistId}/tracks`,
-    ),
-};
+export interface SyncStatusResponse {
+  success: boolean;
+  hasActiveJob: boolean;
+  hasData: boolean;
+  dataExpired: boolean;
+  lastSync?: string;
+  lastSyncedAt?: string;
+  stats?: {
+    playlists: number;
+    tracks: number;
+    artists: number;
+    skippedPlaylists?: number;
+  };
+  lastJob?: {
+    jobId: string;
+    status: "waiting" | "active" | "completed" | "failed";
+    error?: string;
+    completedAt?: string;
+  };
+  // Present when hasActiveJob is true
+  jobId?: string;
+  status?: "waiting" | "active" | "completed" | "failed";
+  progress?: number;
+  message?: string;
+  error?: string;
+}
 
 // Base api endpoints
 export const baseAPI = {
   // Data persistence
   persist: () => api.post<PersistResponse>("/persist"),
-  getSyncStatus: () => api.get("/persist/status"),
+  getSyncStatus: () => api.get<SyncStatusResponse>("/persist/status"),
   deleteData: () => api.delete("/persist"),
 
   // Analysis and aggregation
   analyzePlaylist: (playlistId: string) =>
     api.get<PlaylistAnalysisResult>(`/playlists/${playlistId}/analyze`),
-  aggregatePlaylists: () => api.post<Playlist[]>("/playlists/aggregate"),
 
   // Tracks
   getTracks: () => api.get<Track[]>("/tracks"),
 
   // Playlists
-  getPlaylists: (offset = 0) =>
-    api.get<Playlist[]>(`/playlists?offset=${offset}`),
+  getPlaylists: () => api.get<Playlist[]>("/playlists"),
   getPlaylist: (playlistId: string) =>
     api.get<Playlist>(`/playlists/${playlistId}`),
-  getPlaylistTracks: (playlistId: string, offset = 0) =>
-    api.get<Track[]>(`/playlists/${playlistId}/tracks?offset=${offset}`),
+  getPlaylistTracks: (playlistId: string) =>
+    api.get<Track[]>(`/playlists/${playlistId}/tracks`),
+  addTrackToPlaylist: (playlistId: string, trackId: string) =>
+    api.post(`/playlists/${playlistId}/tracks`, { trackId }),
 
   // Artists
   getArtists: () => api.get<Artist[]>("/artists"),
@@ -160,3 +147,15 @@ api.interceptors.response.use(
     return Promise.reject(error);
   },
 );
+
+/** Best human-readable message from an API error response. */
+export function getApiErrorMessage(error: unknown, fallback: string): string {
+  if (axios.isAxiosError(error)) {
+    const data = error.response?.data as
+      | { message?: string; error?: string }
+      | undefined;
+    return data?.message || data?.error || fallback;
+  }
+  if (error instanceof Error && error.message) return error.message;
+  return fallback;
+}

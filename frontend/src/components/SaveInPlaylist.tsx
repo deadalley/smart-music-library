@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Check, Loader2, Plus } from "lucide-react";
-import { spotifyAPI } from "../services/api";
+import { baseAPI, getApiErrorMessage } from "../services/api";
 import { Tooltip } from "./Tooltip";
 
 export function SaveInPlaylist({
@@ -14,10 +14,11 @@ export function SaveInPlaylist({
 
   const addToPlaylistMutation = useMutation({
     mutationFn: async () => {
-      return spotifyAPI.addTrackToPlaylist(playlistId, trackId);
+      return baseAPI.addTrackToPlaylist(playlistId, trackId);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["playlists"] });
+      queryClient.invalidateQueries({ queryKey: ["playlist", playlistId] });
       queryClient.invalidateQueries({ queryKey: ["aggregated-liked-songs"] });
       queryClient.invalidateQueries({ queryKey: ["saved-tracks"] });
     },
@@ -47,11 +48,18 @@ export function SaveInPlaylist({
       content={
         addToPlaylistMutation.isPending
           ? "Adding to playlist..."
-          : "Add to playlist"
+          : addToPlaylistMutation.isError
+            ? getApiErrorMessage(
+                addToPlaylistMutation.error,
+                "Failed to add to playlist",
+              )
+            : "Add to playlist"
       }
     >
       <button
-        className="btn btn-sm max-lg:btn-circle lg:btn-wide btn-primary"
+        className={`btn btn-sm max-lg:btn-circle lg:btn-wide ${
+          addToPlaylistMutation.isError ? "btn-error" : "btn-primary"
+        }`}
         onClick={handleAddToPlaylist}
         disabled={addToPlaylistMutation.isPending}
       >

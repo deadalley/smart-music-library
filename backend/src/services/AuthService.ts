@@ -1,65 +1,63 @@
 import { redisClient } from "../redis";
 
-// Matches the fixed, login-anchored expiry already used for the auth
-// cookies (see requireAuth.ts / auth.ts maxAge values) — not sliding.
-const TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+// Matches the fixed, login-anchored expiry used for the auth cookies.
+const USER_TTL_SECONDS = 30 * 24 * 60 * 60;
 
-export interface UserSourceData {
-  userId: string;
-  accessToken: string;
+export interface AuthUser {
+  id: string;
+  displayName: string;
+  createdAt?: string;
+  /**
+   * Google only issues a refresh token on the first grant (or a forced
+   * re-consent), so it's kept server-side to restore it on later logins.
+   * Access tokens are deliberately not stored: they live in the cookie only.
+   */
   refreshToken?: string;
 }
 
-export interface AuthUser {
-  createdAt?: string;
-  ytMusic?: UserSourceData;
-  spotify?: UserSourceData;
-}
-
 export class AuthService {
-  // Generic function to generate Redis keys
   private getRedisKey(userId: string): string {
-    const namespace = `smart-spotify:user`;
-
-    return `${namespace}:${userId}`;
+    return `smart-spotify:user:${userId}`;
   }
 
   async getUser(userId: string): Promise<AuthUser | null> {
-    const userKey = this.getRedisKey(userId);
-    const userData = await redisClient.hGetAll(userKey);
+    const userData = await redisClient.hGetAll(this.getRedisKey(userId));
+    if (!userData || Object.keys(userData).length === 0) return null;
 
-    if (!userData || Object.keys(userData).length === 0) {
-      return null;
+    // Legacy shape stored the YouTube data as a JSON blob under "ytMusic".
+    let legacy: { refreshToken?: string } = {};
+    if (userData.ytMusic) {
+      try {
+        legacy = JSON.parse(userData.ytMusic);
+      } catch {
+        legacy = {};
+      }
     }
 
     return {
-      spotify: userData.spotify ? JSON.parse(userData.spotify) : undefined,
-      ytMusic: userData.ytMusic ? JSON.parse(userData.ytMusic) : undefined,
+      id: userId,
+      displayName: userData.displayName || userId,
+      createdAt: userData.createdAt,
+      refreshToken: userData.refreshToken || legacy.refreshToken || undefined,
     };
   }
 
-  async createUser(userId: string): Promise<string> {
-    const userKey = this.getRedisKey(userId);
-    const exists = await redisClient.exists(userKey);
+  async saveYouTubeUser(user: {
+    id: string;
+    displayName: string;
+    refreshToken?: string;
+  }): Promise<void> {
+    const key = this.getRedisKey(user.id);
+    const fields: Record<string, string> = { displayName: user.displayName };
+    if (user.refreshToken) fields.refreshToken = user.refreshToken;
 
-    if (exists) {
-      return userId;
-    }
-
-    await redisClient.hSet(userKey, "createdAt", new Date().toISOString());
-    await redisClient.expire(userKey, TOKEN_TTL_SECONDS);
-    return userId;
-  }
-
-  async storeSpotifyToken(userId: string, data: AuthUser["spotify"]) {
-    const userKey = this.getRedisKey(userId);
-    await redisClient.hSet(userKey, "spotify", JSON.stringify(data));
-    await redisClient.expire(userKey, TOKEN_TTL_SECONDS);
-  }
-
-  async storeYouTubeToken(userId: string, data: AuthUser["ytMusic"]) {
-    const userKey = this.getRedisKey(userId);
-    await redisClient.hSet(userKey, "ytMusic", JSON.stringify(data));
-    await redisClient.expire(userKey, TOKEN_TTL_SECONDS);
+    await redisClient
+      .multi()
+      .hSetNX(key, "createdAt", new Date().toISOString())
+      .hSet(key, fields)
+      // Drop the legacy blob, which also contained a stale access token.
+      .hDel(key, ["ytMusic", "spotify"])
+      .expire(key, USER_TTL_SECONDS)
+      .exec();
   }
 }

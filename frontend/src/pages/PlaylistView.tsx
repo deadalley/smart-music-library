@@ -9,13 +9,11 @@ import { PlaylistAnalysisResult } from "../components/PlaylistAnalysisResult";
 import { PlaylistTypeSelector } from "../components/PlaylistTypeSelector";
 import { SourceLink } from "../components/SourceLink";
 import { TrackList } from "../components/TrackList";
-import { useAuth } from "../contexts/AuthContext";
 import { baseAPI } from "../services/api";
 import { formatDuration } from "../utils";
 
 export function PlaylistView() {
   const { id } = useParams<{ id: string }>();
-  const { source } = useAuth();
 
   const {
     data: playlist,
@@ -94,9 +92,9 @@ export function PlaylistView() {
           )}
         </div>
 
-        {/* Genre/consistency analysis relies on genre data the sync job
-            never populates for YouTube Music, so it'd just be empty. */}
-        {analysisResult && source === "spotify" && (
+        {/* Genre/consistency analysis needs artist genres, which YouTube
+            doesn't provide; only show it when there's something to show. */}
+        {genres.length > 0 && (
           <div className="flex-1">
             <PlaylistAnalysisResult
               artists={artists}

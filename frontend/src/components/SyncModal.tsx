@@ -2,8 +2,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, RefreshCw, Trash } from "lucide-react";
 import { useEffect, useReducer, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAuth } from "../contexts/AuthContext";
-import { baseAPI } from "../services/api";
+import {
+  baseAPI,
+  getApiErrorMessage,
+  SyncStatusResponse,
+} from "../services/api";
 import { getAppName } from "../utils";
 
 interface SyncState {
@@ -40,8 +43,20 @@ type SyncStep = {
   minProgress: number;
 };
 
+// Consecutive failed status polls tolerated before giving up (a single
+// network blip shouldn't abort the progress view of a sync that's fine).
+const MAX_POLL_FAILURES = 5;
+
+function completionMessage(status: SyncStatusResponse): string {
+  const skipped = status.stats?.skippedPlaylists ?? 0;
+  const base = "Sync complete.";
+  return skipped > 0
+    ? `${base} ${skipped} playlist${skipped === 1 ? "" : "s"} couldn't be read and ${skipped === 1 ? "was" : "were"} skipped.`
+    : base;
+}
+
 const SYNC_STEPS: readonly SyncStep[] = [
-  { key: "user", label: "User info", minProgress: 5 },
+  { key: "user", label: "Liked songs", minProgress: 5 },
   { key: "playlists", label: "Playlists", minProgress: 25 },
   { key: "tracks", label: "Tracks", minProgress: 65 },
   { key: "artists", label: "Artists", minProgress: 80 },
@@ -107,10 +122,10 @@ function syncReducer(state: SyncState, action: SyncAction): SyncState {
 }
 
 export function SyncModal() {
-  const { source } = useAuth();
   const appName = getAppName();
   const [state, dispatch] = useReducer(syncReducer, initialState);
   const pollingIntervalRef = useRef<number | null>(null);
+  const pollFailuresRef = useRef(0);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const isSuccess = state.completion === "sync" && state.syncProgress === 100;
@@ -127,18 +142,27 @@ export function SyncModal() {
   const pollJobStatus = () => {
     // Ensure we never create multiple polling intervals
     stopPolling();
+    pollFailuresRef.current = 0;
     const poll = async () => {
       try {
         const response = await baseAPI.getSyncStatus();
         const jobStatus = response.data;
+        pollFailuresRef.current = 0;
 
-        // If no active job is found, the job might have completed and been cleaned up
+        // No job in progress any more: the outcome is in lastJob.
         if (!jobStatus.hasActiveJob) {
+          stopPolling();
+          if (jobStatus.lastJob?.status === "failed") {
+            dispatch({
+              type: "FAIL_SYNC",
+              error: jobStatus.lastJob.error || "Sync failed",
+            });
+            return;
+          }
           dispatch({
             type: "COMPLETE_SYNC",
-            message: jobStatus.message || "Sync complete.",
+            message: completionMessage(jobStatus),
           });
-          stopPolling();
           // Invalidate all queries to refresh data
           queryClient.invalidateQueries();
           return;
@@ -153,7 +177,7 @@ export function SyncModal() {
         if (jobStatus.status === "completed") {
           dispatch({
             type: "COMPLETE_SYNC",
-            message: jobStatus.message || "Sync complete.",
+            message: completionMessage(jobStatus),
           });
           stopPolling();
           // Invalidate all queries to refresh data
@@ -167,11 +191,14 @@ export function SyncModal() {
         }
       } catch (error) {
         console.error("Error polling job status:", error);
-        dispatch({
-          type: "FAIL_SYNC",
-          error: "Failed to get job status",
-        });
-        stopPolling();
+        pollFailuresRef.current += 1;
+        if (pollFailuresRef.current >= MAX_POLL_FAILURES) {
+          dispatch({
+            type: "FAIL_SYNC",
+            error: getApiErrorMessage(error, "Failed to get sync status"),
+          });
+          stopPolling();
+        }
       }
     };
 
@@ -191,7 +218,7 @@ export function SyncModal() {
       ) {
         dispatch({
           type: "RESUME_JOB",
-          jobId: activeJob.jobId,
+          jobId: activeJob.jobId ?? "",
           progress: activeJob.progress || 0,
           message: activeJob.message || "Resuming existing sync...",
         });
@@ -222,7 +249,7 @@ export function SyncModal() {
       ) {
         dispatch({
           type: "RESUME_JOB",
-          jobId: activeJob.jobId,
+          jobId: activeJob.jobId ?? "",
           progress: activeJob.progress || 0,
           message: activeJob.message || "Resuming existing sync...",
         });
@@ -273,7 +300,11 @@ export function SyncModal() {
   };
 
   const handleDelete = async () => {
-    if (!confirm("Are you sure you want to delete all synced data?")) {
+    if (
+      !confirm(
+        "Delete all synced data? This also removes your wishlist/owned marks and playlist types.",
+      )
+    ) {
       return;
     }
 
@@ -349,15 +380,6 @@ export function SyncModal() {
                   </span>{" "}
                   of inactivity — just sync again anytime to refresh it.
                 </li>
-                {source === "spotify" && (
-                  <li>
-                    Any changes you make in {appName} will be{" "}
-                    <span className="font-semibold text-base-content">
-                      automatically
-                    </span>{" "}
-                    synced back.
-                  </li>
-                )}
                 <li>
                   Changes you make elsewhere need to be{" "}
                   <span className="font-semibold text-base-content">

@@ -1,100 +1,65 @@
-import { SpotifyUser } from "@smart-music-library/shared";
+import { AppUser } from "@smart-music-library/shared";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  createContext,
-  ReactNode,
-  useContext,
-  useEffect,
-  useState,
-} from "react";
-import { authAPI } from "../services/api";
+import { createContext, ReactNode, useContext, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { authAPI } from "../services/api";
 
-export type AuthSource = "spotify" | "youtube";
-
-const AUTH_SOURCE_STORAGE_KEY = "smart_spotify_auth_source";
-
-function getStoredSource(): AuthSource {
-  const value = localStorage.getItem(AUTH_SOURCE_STORAGE_KEY);
-  return value === "youtube" ? "youtube" : "spotify";
-}
+// Left over from when the app supported more than one music source.
+const LEGACY_AUTH_SOURCE_STORAGE_KEY = "smart_spotify_auth_source";
 
 interface AuthContextType {
-  user: SpotifyUser | null;
+  user: AppUser | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  source: AuthSource;
-  setSource: (source: AuthSource) => void;
-  login: (source: AuthSource) => void;
+  login: () => void;
   logout: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-interface AuthProviderProps {
-  children: ReactNode;
-}
-
-export function AuthProvider({ children }: AuthProviderProps) {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [source, setSourceState] = useState<AuthSource>(() =>
-    getStoredSource(),
-  );
+export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
 
   const { data: user, isLoading } = useQuery({
     queryKey: ["user"],
-    queryFn: async () => {
-      const response = await authAPI.getUser();
-      setIsAuthenticated(true);
-      return response.data;
-    },
+    queryFn: async () => (await authAPI.getUser()).data,
     retry: false,
-    enabled: !isAuthenticated,
+    staleTime: Infinity,
   });
 
   const logoutMutation = useMutation({
-    mutationFn: () => authAPI.logout(source),
+    mutationFn: () => authAPI.logout(),
     // Always drop the local session, even if the network call fails (e.g.
     // offline) — the user's intent to log out shouldn't get stuck waiting
     // on the server.
     onSettled: () => {
-      setIsAuthenticated(false);
       queryClient.clear();
       navigate("/login");
     },
   });
 
-  const setSource = (nextSource: AuthSource) => {
-    localStorage.setItem(AUTH_SOURCE_STORAGE_KEY, nextSource);
-    setSourceState(nextSource);
-  };
-
-  const login = (loginSource: AuthSource) => {
-    setSource(loginSource);
-    authAPI.login(loginSource);
-  };
-
-  const logout = () => {
-    logoutMutation.mutate();
-  };
+  useEffect(() => {
+    try {
+      localStorage.removeItem(LEGACY_AUTH_SOURCE_STORAGE_KEY);
+    } catch {
+      // storage unavailable (private mode etc.) — nothing to clean up
+    }
+  }, []);
 
   useEffect(() => {
-    if (user && location.pathname.includes("/login")) {
-      navigate("/");
+    if (user && location.pathname.startsWith("/login")) {
+      navigate("/", { replace: true });
     }
-  }, [user, location]);
+  }, [user, location.pathname, navigate]);
 
   const value: AuthContextType = {
-    user: user || null,
+    user: user ?? null,
     isLoading,
-    isAuthenticated,
-    source,
-    setSource,
-    login,
-    logout,
+    isAuthenticated: !!user,
+    login: () => authAPI.login(),
+    logout: () => logoutMutation.mutate(),
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

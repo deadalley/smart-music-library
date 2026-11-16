@@ -1,7 +1,6 @@
 import { PlaylistType, TrackOwnership } from "@smart-music-library/shared";
 import dayjs from "dayjs";
 import duration from "dayjs/plugin/duration";
-import type { AuthSource } from "../contexts/AuthContext";
 
 dayjs.extend(duration);
 
@@ -9,14 +8,9 @@ export function getAppName(): string {
   return "Smart Music";
 }
 
-// Opens straight into playback where possible: YouTube Music's watch page
-// autoplays by default, and Spotify's embed player autoplays a preview when
-// given autoplay=1 (the regular open.spotify.com track page does not
-// autoplay).
-export function getListenUrl(source: AuthSource, trackId: string): string {
-  return source === "spotify"
-    ? `https://open.spotify.com/embed/track/${trackId}?autoplay=1`
-    : `https://music.youtube.com/watch?v=${trackId}`;
+// YouTube Music's watch page starts playback straight away.
+export function getListenUrl(trackId: string): string {
+  return `https://music.youtube.com/watch?v=${encodeURIComponent(trackId)}`;
 }
 
 export function formatDuration(ms: number): string {
