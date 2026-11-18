@@ -1,6 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import "./App.css";
-import { AuthProvider, useAuth } from "./contexts/AuthContext";
+import { AuthProvider } from "./contexts/AuthContext";
 import { SettingsProvider } from "./contexts/SettingsContext";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import { Artists } from "./pages/Artists";
@@ -14,19 +14,6 @@ import { Settings } from "./pages/Settings";
 import { SyncRequired } from "./pages/SyncRequired";
 import { Wishlist } from "./pages/Wishlist";
 import { Layout } from "./components/Layout";
-import { RequireSpotify } from "./components/RequireSpotify";
-
-// Liked Songs is Spotify-only (see RequireSpotify), so land YouTube Music
-// users on Playlists instead.
-function IndexRedirect() {
-  const { source } = useAuth();
-  return (
-    <Navigate
-      to={source === "spotify" ? "/saved-tracks" : "/playlists"}
-      replace
-    />
-  );
-}
 
 function App() {
   return (
@@ -36,18 +23,11 @@ function App() {
           <Routes>
             <Route path="/login" element={<Home />} />
             <Route path="/" element={<Layout />}>
-              <Route index element={<IndexRedirect />} />
+              <Route index element={<Navigate to="/saved-tracks" replace />} />
               <Route path="sync" element={<SyncRequired />} />
               <Route path="playlists" element={<Playlists />} />
               <Route path="playlists/:id" element={<PlaylistView />} />
-              <Route
-                path="saved-tracks"
-                element={
-                  <RequireSpotify>
-                    <SavedTracks />
-                  </RequireSpotify>
-                }
-              />
+              <Route path="saved-tracks" element={<SavedTracks />} />
               <Route path="artists" element={<Artists />} />
               <Route path="artists/:id" element={<ArtistView />} />
               <Route path="albums/:id" element={<AlbumView />} />

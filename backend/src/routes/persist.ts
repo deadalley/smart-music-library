@@ -1,92 +1,58 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { Request, Response, Router } from "express";
-import { requireAuth } from "../middleware/requireAuth";
-import { RedisService } from "../services";
-import { BullService } from "../services/BullService";
-import type { MusicSource } from "../services/RedisService";
+import {
+  REFRESH_TOKEN_COOKIE,
+  requireAuth,
+} from "../middleware/requireAuth";
+import { BullService, RedisService } from "../services";
 
-const router: Router = Router();
-const bullService = new BullService();
+export function createPersistRouter(bullService: BullService): Router {
+  const router: Router = Router();
+  router.use(requireAuth);
 
-function getRequestSource(req: Request): MusicSource {
-  const source = (req as any).source as MusicSource | undefined;
-  return source === "yt-music" ? "yt-music" : "spotify";
-}
+  router.post("/", async (req: Request, res: Response) => {
+    try {
+      const { jobId, alreadyRunning } = await bullService.startPersistJob(
+        req.userId!,
+        req.accessToken!,
+        req.cookies?.[REFRESH_TOKEN_COOKIE] as string | undefined,
+      );
 
-router.post("/", requireAuth, async (req: Request, res: Response) => {
-  try {
-    const source = getRequestSource(req);
-    const refreshToken =
-      source === "spotify"
-        ? (req.cookies?.spotify_refresh_token as string | undefined)
-        : (req.cookies?.youtube_refresh_token as string | undefined);
-    const userId = req.cookies?.user_id;
-
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
-
-    const existingJobId = await bullService.getActiveJob(userId);
-
-    if (existingJobId) {
-      return res.json({
+      res.json({
         success: true,
-        message: "Persist job is already running",
-        jobId: existingJobId,
-        status: "active",
+        message: alreadyRunning
+          ? "Persist job is already running"
+          : "Persist job started successfully",
+        jobId,
+        status: alreadyRunning ? "active" : "started",
       });
+    } catch (error) {
+      console.error("Error starting persist job:", error);
+      res.status(500).json({ error: "Failed to start sync" });
     }
+  });
 
-    const jobId = await bullService.startPersistJob(
-      userId,
-      (req as any).accessToken,
-      refreshToken,
-      source,
-    );
+  router.get("/status", async (req: Request, res: Response) => {
+    try {
+      const userId = req.userId!;
+      const library = await RedisService.forUser(userId);
 
-    res.json({
-      success: true,
-      message: "Persist job started successfully",
-      jobId: jobId,
-      status: "started",
-    });
-  } catch (error: any) {
-    console.error("Error starting persist job:", error);
-    if (error.response?.status === 401) {
-      return res.status(401).json({ error: "Token expired" });
-    }
-    res.status(500).json({
-      error: "Failed to start persist job",
-      details: error.message,
-    });
-  }
-});
+      const [meta, lastSyncedAtMarker, activeJobId, lastJob] =
+        await Promise.all([
+          library.getSyncMeta(),
+          library.getLastSyncedAt(),
+          bullService.getActiveJob(userId),
+          bullService.getLastJobStatus(userId),
+        ]);
 
-router.get("/status", requireAuth, async (req: Request, res: Response) => {
-  try {
-    const redisService = new RedisService(getRequestSource(req));
-    const userId = (req as any).userId as string | undefined;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
+      const hasData = !!meta?.lastSync;
+      // The marker key has no TTL, so it survives after the rest of a
+      // user's library data auto-expires — letting us tell "never synced"
+      // apart from "synced before, but the cache has since expired".
+      const dataExpired = !hasData && !!lastSyncedAtMarker;
+      const lastSyncedAt = meta?.lastSync || lastSyncedAtMarker || undefined;
 
-    const meta = await redisService.getSyncMeta(userId);
-    const hasData = !!meta?.lastSync;
-    const lastSyncedAtMarker = hasData
-      ? undefined
-      : await redisService.getLastSyncedAt(userId);
-    // The marker key has no TTL, so it survives after the rest of a user's
-    // library data auto-expires — letting us tell "never synced" apart
-    // from "synced before, but the cache has since expired".
-    const dataExpired = !hasData && !!lastSyncedAtMarker;
-    const lastSyncedAt = meta?.lastSync || lastSyncedAtMarker || undefined;
-
-    const activeJobId = await bullService.getActiveJob(userId);
-
-    if (!activeJobId) {
-      return res.json({
+      const base = {
         success: true,
-        hasActiveJob: false,
         hasData,
         dataExpired,
         lastSync: meta?.lastSync,
@@ -96,67 +62,59 @@ router.get("/status", requireAuth, async (req: Request, res: Response) => {
               playlists: meta.playlistCount,
               tracks: meta.trackCount,
               artists: meta.artistCount,
+              skippedPlaylists: meta.skippedPlaylists,
             }
           : undefined,
-        message: "No active persist job found",
+        // Outcome of the most recent sync (completed / failed + error), so
+        // the client can tell success from failure once nothing is active.
+        lastJob: lastJob
+          ? {
+              jobId: lastJob.jobId,
+              status: lastJob.status,
+              error: lastJob.error,
+              completedAt: lastJob.completedAt,
+            }
+          : undefined,
+      };
+
+      if (!activeJobId) {
+        return res.json({
+          ...base,
+          hasActiveJob: false,
+          message: "No active persist job found",
+        });
+      }
+
+      const jobStatus = await bullService.getJobStatus(activeJobId);
+      res.json({
+        ...base,
+        hasActiveJob: true,
+        jobId: activeJobId,
+        ...jobStatus,
       });
+    } catch (error) {
+      console.error("Error getting sync status:", error);
+      res.status(500).json({ error: "Failed to get sync status" });
     }
+  });
 
-    const jobStatus = await bullService.getJobStatus(activeJobId);
+  router.delete("/", async (req: Request, res: Response) => {
+    try {
+      const userId = req.userId!;
+      if (await bullService.getActiveJob(userId)) {
+        return res.status(409).json({
+          error: "Cannot delete data while sync is in progress",
+        });
+      }
 
-    res.json({
-      success: true,
-      hasActiveJob: true,
-      hasData,
-      dataExpired,
-      lastSync: meta?.lastSync,
-      lastSyncedAt,
-      jobId: activeJobId,
-      ...jobStatus,
-    });
-  } catch (error: any) {
-    console.error("Error getting active job status:", error);
-    if (error.response?.status === 401) {
-      return res.status(401).json({ error: "Token expired" });
+      await RedisService.deleteAllUserData(userId);
+
+      res.json({ success: true, message: "User data deleted successfully" });
+    } catch (error) {
+      console.error("Error deleting user data:", error);
+      res.status(500).json({ error: "Failed to delete user data" });
     }
-    res.status(500).json({
-      error: "Failed to get active job status",
-      details: error.message,
-    });
-  }
-});
+  });
 
-router.delete("/", requireAuth, async (req: Request, res: Response) => {
-  try {
-    const redisService = new RedisService(getRequestSource(req));
-    const userId = (req as any).userId as string | undefined;
-    if (!userId) {
-      return res.status(401).json({ error: "Not authenticated" });
-    }
-
-    const activeJobId = await bullService.getActiveJob(userId);
-    if (activeJobId) {
-      return res.status(400).json({
-        error: "Cannot delete data while sync is in progress",
-      });
-    }
-
-    await redisService.deleteUserData(userId);
-
-    res.json({
-      success: true,
-      message: "User data deleted successfully",
-    });
-  } catch (error: any) {
-    console.error("Error deleting user data:", error);
-    if (error.response?.status === 401) {
-      return res.status(401).json({ error: "Token expired" });
-    }
-    res.status(500).json({
-      error: "Failed to delete user data",
-      details: error.message,
-    });
-  }
-});
-
-export { router as persistRouter };
+  return router;
+}

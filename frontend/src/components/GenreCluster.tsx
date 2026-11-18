@@ -34,7 +34,7 @@ export function GenreCluster({
         >
           {(cloudWords) =>
             cloudWords.map((w, i) => {
-              // Use different opacity values of the Spotify green (#1ed760)
+              // Use different opacity values of the primary colour
               const opacity = 0.4 + (i % 6) * 0.1; // opacity from 0.4 to 0.9
               return (
                 <text

@@ -1,5 +1,50 @@
 import { Image } from "@smart-music-library/shared";
 import { google, youtube_v3 } from "googleapis";
+import { withRetry } from "../lib/retry";
+
+// Without a timeout, a hung upstream request would stall the (single
+// concurrency) sync worker indefinitely.
+const REQUEST_TIMEOUT_MS = 20_000;
+google.options({ timeout: REQUEST_TIMEOUT_MS });
+
+export const YOUTUBE_READ_SCOPE =
+  "https://www.googleapis.com/auth/youtube.readonly";
+export const YOUTUBE_WRITE_SCOPE =
+  "https://www.googleapis.com/auth/youtube.force-ssl";
+
+export interface YouTubeVideo {
+  id: string;
+  title: string;
+  channelId: string;
+  channelTitle: string;
+  publishedAt?: string;
+  durationMs: number;
+  thumbnails: youtube_v3.Schema$ThumbnailDetails | null;
+  viewCount?: number;
+  categoryId?: string;
+}
+
+function toYouTubeVideo(v: youtube_v3.Schema$Video): YouTubeVideo | null {
+  const id = v.id;
+  const title = v.snippet?.title;
+  const channelId = v.snippet?.channelId;
+  const channelTitle = v.snippet?.channelTitle;
+  if (!id || !title || !channelId || !channelTitle) return null;
+
+  return {
+    id,
+    title,
+    channelId,
+    channelTitle,
+    publishedAt: v.snippet?.publishedAt ?? undefined,
+    durationMs: parseISODurationToMs(v.contentDetails?.duration),
+    thumbnails: v.snippet?.thumbnails ?? null,
+    viewCount: v.statistics?.viewCount
+      ? Number(v.statistics.viewCount)
+      : undefined,
+    categoryId: v.snippet?.categoryId ?? undefined,
+  };
+}
 
 type TokenData = {
   access_token?: string | null;
@@ -104,9 +149,9 @@ export class YouTubeService {
       state,
       scope: [
         // Read playlists + playlist items.
-        "https://www.googleapis.com/auth/youtube.readonly",
-        // Some endpoints (e.g. channels.mine) are commonly used with this scope too.
-        "https://www.googleapis.com/auth/youtube.force-ssl",
+        YOUTUBE_READ_SCOPE,
+        // Write access: add to playlist, remove a like.
+        YOUTUBE_WRITE_SCOPE,
         // Basic identity (not strictly required, but useful).
         "openid",
         "email",
@@ -141,7 +186,9 @@ export class YouTubeService {
     if (!refresh) {
       throw new Error("No refresh token available");
     }
-    const { credentials } = await this.oauth2Client.refreshAccessToken();
+    const { credentials } = await withRetry(() =>
+      this.oauth2Client.refreshAccessToken(),
+    );
     return {
       access_token: credentials.access_token,
       refresh_token: credentials.refresh_token,
@@ -153,13 +200,14 @@ export class YouTubeService {
     id: string;
     title: string;
     thumbnails: youtube_v3.Schema$ThumbnailDetails | null;
-    likesPlaylistId?: string;
   }> {
-    const res = await this.youtube.channels.list({
-      mine: true,
-      part: ["snippet", "contentDetails"],
-      maxResults: 1,
-    });
+    const res = await withRetry(() =>
+      this.youtube.channels.list({
+        mine: true,
+        part: ["snippet"],
+        maxResults: 1,
+      }),
+    );
 
     const channel = res.data.items?.[0];
     const id = channel?.id;
@@ -169,13 +217,10 @@ export class YouTubeService {
       throw new Error("Failed to fetch YouTube channel for authenticated user");
     }
 
-    const likesPlaylistId = channel?.contentDetails?.relatedPlaylists?.likes;
-
     return {
       id,
       title,
       thumbnails: channel?.snippet?.thumbnails ?? null,
-      likesPlaylistId: likesPlaylistId || undefined,
     };
   }
 
@@ -198,12 +243,14 @@ export class YouTubeService {
 
     let pageToken: string | undefined;
     do {
-      const res = await this.youtube.playlists.list({
-        mine: true,
-        part: ["snippet", "contentDetails"],
-        maxResults: 50,
-        pageToken,
-      });
+      const res = await withRetry(() =>
+        this.youtube.playlists.list({
+          mine: true,
+          part: ["snippet", "contentDetails"],
+          maxResults: 50,
+          pageToken,
+        }),
+      );
 
       const items = res.data.items ?? [];
       for (const p of items) {
@@ -227,12 +274,14 @@ export class YouTubeService {
     const ids: string[] = [];
     let pageToken: string | undefined;
     do {
-      const res = await this.youtube.playlistItems.list({
-        playlistId,
-        part: ["contentDetails"],
-        maxResults: 50,
-        pageToken,
-      });
+      const res = await withRetry(() =>
+        this.youtube.playlistItems.list({
+          playlistId,
+          part: ["contentDetails"],
+          maxResults: 50,
+          pageToken,
+        }),
+      );
 
       const items = res.data.items ?? [];
       for (const it of items) {
@@ -246,67 +295,74 @@ export class YouTubeService {
     return ids;
   }
 
-  async getVideosByIds(ids: string[]): Promise<
-    Array<{
-      id: string;
-      title: string;
-      channelId: string;
-      channelTitle: string;
-      publishedAt?: string;
-      durationMs: number;
-      thumbnails: youtube_v3.Schema$ThumbnailDetails | null;
-      viewCount?: number;
-      categoryId?: string;
-    }>
-  > {
+  async getVideosByIds(ids: string[]): Promise<YouTubeVideo[]> {
     if (ids.length === 0) return [];
 
-    const chunks: string[][] = [];
-    for (let i = 0; i < ids.length; i += 50) chunks.push(ids.slice(i, i + 50));
-
-    const results: Array<{
-      id: string;
-      title: string;
-      channelId: string;
-      channelTitle: string;
-      publishedAt?: string;
-      durationMs: number;
-      thumbnails: youtube_v3.Schema$ThumbnailDetails | null;
-      viewCount?: number;
-      categoryId?: string;
-    }> = [];
-
-    for (const chunk of chunks) {
-      const res = await this.youtube.videos.list({
-        id: chunk,
-        part: ["snippet", "contentDetails", "statistics"],
-        maxResults: 50,
-      });
+    const results: YouTubeVideo[] = [];
+    for (let i = 0; i < ids.length; i += 50) {
+      const chunk = ids.slice(i, i + 50);
+      const res = await withRetry(() =>
+        this.youtube.videos.list({
+          id: chunk,
+          part: ["snippet", "contentDetails", "statistics"],
+          maxResults: 50,
+        }),
+      );
 
       for (const v of res.data.items ?? []) {
-        const id = v.id;
-        const title = v.snippet?.title;
-        const channelId = v.snippet?.channelId;
-        const channelTitle = v.snippet?.channelTitle;
-        if (!id || !title || !channelId || !channelTitle) continue;
-
-        results.push({
-          id,
-          title,
-          channelId,
-          channelTitle,
-          publishedAt: v.snippet?.publishedAt ?? undefined,
-          durationMs: parseISODurationToMs(v.contentDetails?.duration),
-          thumbnails: v.snippet?.thumbnails ?? null,
-          viewCount: v.statistics?.viewCount
-            ? Number(v.statistics.viewCount)
-            : undefined,
-          categoryId: v.snippet?.categoryId ?? undefined,
-        });
+        const video = toYouTubeVideo(v);
+        if (video) results.push(video);
       }
     }
 
     return results;
+  }
+
+  /** Videos the authenticated user has liked ("Liked videos"). */
+  async listLikedVideos(): Promise<YouTubeVideo[]> {
+    const results: YouTubeVideo[] = [];
+    let pageToken: string | undefined;
+    do {
+      const res = await withRetry(() =>
+        this.youtube.videos.list({
+          myRating: "like",
+          part: ["snippet", "contentDetails", "statistics"],
+          maxResults: 50,
+          pageToken,
+        }),
+      );
+
+      for (const v of res.data.items ?? []) {
+        const video = toYouTubeVideo(v);
+        if (video) results.push(video);
+      }
+
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+
+    return results;
+  }
+
+  /** Requires the youtube.force-ssl scope. */
+  // Not wrapped in withRetry: inserting isn't idempotent, and retrying after
+  // an ambiguous 5xx could add the video twice.
+  async addVideoToPlaylist(playlistId: string, videoId: string): Promise<void> {
+    await this.youtube.playlistItems.insert({
+      part: ["snippet"],
+      requestBody: {
+        snippet: {
+          playlistId,
+          resourceId: { kind: "youtube#video", videoId },
+        },
+      },
+    });
+  }
+
+  /** Removes the user's like from a video. Requires youtube.force-ssl. */
+  async unlikeVideo(videoId: string): Promise<void> {
+    await withRetry(() =>
+      this.youtube.videos.rate({ id: videoId, rating: "none" }),
+    );
   }
 
   async getChannelsByIds(ids: string[]): Promise<
@@ -326,11 +382,13 @@ export class YouTubeService {
     }> = [];
 
     for (const chunk of chunks) {
-      const res = await this.youtube.channels.list({
-        id: chunk,
-        part: ["snippet"],
-        maxResults: 50,
-      });
+      const res = await withRetry(() =>
+        this.youtube.channels.list({
+          id: chunk,
+          part: ["snippet"],
+          maxResults: 50,
+        }),
+      );
 
       for (const c of res.data.items ?? []) {
         if (!c.id) continue;

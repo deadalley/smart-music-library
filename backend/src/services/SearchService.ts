@@ -3,19 +3,23 @@ import {
   SearchResultGroup,
   Track,
 } from "@smart-music-library/shared";
-import { RedisService } from "./RedisService";
+import { LIKED_SONGS_PLAYLIST_ID, RedisService } from "./RedisService";
 
 const MAX_RESULTS_PER_SECTION = 8;
 
-function matches(
+// Every query token must appear somewhere across the given fields, so a
+// query like "artist title" matches a track whose artist and title each
+// contain one of the words.
+export function matches(
   queryTokens: string[],
   ...fields: (string | undefined)[]
 ): boolean {
-  return fields.some((field) => {
-    if (!field) return false;
-    const lower = field.toLowerCase();
-    return queryTokens.every((token) => lower.includes(token));
-  });
+  const haystack = fields
+    .filter((f): f is string => !!f)
+    .join(" \u0000 ")
+    .toLowerCase();
+  if (!haystack) return false;
+  return queryTokens.every((token) => haystack.includes(token));
 }
 
 function toGroup<T>(matched: T[]): SearchResultGroup<T> {
@@ -59,13 +63,13 @@ function deriveAlbums(tracks: Track[]) {
 export class SearchService {
   constructor(private redisService: RedisService) {}
 
-  async search(userId: string, query: string): Promise<LibrarySearchResult> {
+  async search(query: string): Promise<LibrarySearchResult> {
     const queryTokens = query.toLowerCase().split(/\s+/).filter(Boolean);
 
     const [tracks, artists, playlists] = await Promise.all([
-      this.redisService.getUserTracks(userId),
-      this.redisService.getUserArtists(userId),
-      this.redisService.getUserPlaylists(userId),
+      this.redisService.getUserTracks(),
+      this.redisService.getUserArtists(),
+      this.redisService.getUserPlaylists(),
     ]);
 
     const matchedTracks = tracks.filter((t) =>
@@ -81,7 +85,7 @@ export class SearchService {
     );
 
     const matchedPlaylists = playlists
-      .filter((p) => p.id !== "liked-songs")
+      .filter((p) => p.id !== LIKED_SONGS_PLAYLIST_ID)
       .filter((p) => matches(queryTokens, p.name));
 
     return {

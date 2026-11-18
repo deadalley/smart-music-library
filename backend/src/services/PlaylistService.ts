@@ -8,8 +8,7 @@ import {
   Track,
   TrackAggregationResult,
 } from "@smart-music-library/shared";
-import { isTrackInPlaylist, isTrackNotInPlaylist } from "../utils";
-import { RedisService } from "./RedisService";
+import { LIKED_SONGS_PLAYLIST_ID, RedisService } from "./RedisService";
 
 type GenreInfo = {
   normalized: string;
@@ -89,114 +88,81 @@ function genreSimilarity(a: GenreInfo, b: GenreInfo): number {
 export class PlaylistService {
   constructor(private redisService: RedisService) {}
 
-  async aggregatePlaylists(userId: string): Promise<Playlist[]> {
-    const playlists = await this.redisService.getUserPlaylists(userId);
-    // Placeholder for playlist aggregation logic
-    return playlists;
-  }
-
-  async aggregateLikedSongs(userId: string): Promise<TrackAggregationResult[]> {
-    const playlists = await this.redisService.getUserPlaylists(userId);
-    const playlistData: Record<string, PlaylistData> = {};
-
-    // Load all playlist data except liked-songs
-    for (const playlist of playlists) {
-      if (playlist.id === "liked-songs") {
-        continue;
-      }
-
-      const data = await this.redisService.getPlaylistData(userId, playlist.id);
-      if (data) {
-        playlistData[playlist.id] = data;
-      }
-    }
-
-    const likedTracks = await this.redisService.getPlaylistTracks(
-      userId,
-      "liked-songs"
+  async aggregateLikedSongs(): Promise<TrackAggregationResult[]> {
+    const allPlaylists = await this.redisService.getUserPlaylists();
+    const playlists = allPlaylists.filter(
+      (p) => p.id !== LIKED_SONGS_PLAYLIST_ID,
     );
 
-    const result: TrackAggregationResult[] = [];
+    const [likedTracks, playlistDataList] = await Promise.all([
+      this.redisService.getPlaylistTracks(LIKED_SONGS_PLAYLIST_ID),
+      Promise.all(
+        playlists.map((p) => this.redisService.getPlaylistData(p.id)),
+      ),
+    ]);
 
-    for (const track of likedTracks) {
-      // Find playlists that already contain this track
-      const currentPlaylists = playlists.filter(
-        isTrackInPlaylist(track.id, playlistData)
-      );
+    // Precompute per-playlist lookups once instead of scanning every
+    // playlist's track list for every liked track.
+    const entries = playlists
+      .map((playlist, i) => ({ playlist, data: playlistDataList[i] }))
+      .filter(
+        (e): e is { playlist: Playlist; data: PlaylistData } => !!e.data,
+      )
+      .map(({ playlist, data }) => ({
+        playlist,
+        data,
+        trackIds: new Set(data.tracks.map((t) => t.id)),
+        artistsById: new Map(data.artists.map((a) => [a.id, a])),
+      }));
 
+    return likedTracks.map((track) => {
       const trackArtistIds = new Set(track.artistIds);
 
-      // Find playlists that don't contain this track and calculate similarity
-      const suggestedPlaylists = playlists
-        .filter(isTrackNotInPlaylist(track.id, playlistData))
-        .map((playlist) => {
-          const data = playlistData[playlist.id];
-          if (!data) {
-            return null;
-          }
+      const currentPlaylists = entries
+        .filter((e) => e.trackIds.has(track.id))
+        .map((e) => e.playlist);
 
-          // Find matching genres (with counts from the playlist)
-          const similarGenres = data.genres.filter((g) => {
-            // Check if any of the track's artists have this genre
-            return data.artists.some(
-              (a) => trackArtistIds.has(a.id) && a.genres.includes(g.name)
-            );
-          });
+      const suggestedPlaylists = entries
+        .filter((e) => !e.trackIds.has(track.id))
+        .map(({ playlist, data, artistsById }) => {
+          const trackArtists = [...trackArtistIds]
+            .map((id) => artistsById.get(id))
+            .filter((a): a is Artist => !!a);
 
-          // Find matching artists (with track counts from the playlist)
-          const similarArtists = data.artists
-            .filter((a) => trackArtistIds.has(a.id))
-            .map((artist) => {
-              // Get tracks from this artist in this playlist
-              const artistTracks = data.tracks
-                .filter((t) => t.artistIds.includes(artist.id))
-                .map((t) => ({ id: t.id, name: t.name }));
+          // Genres of this playlist shared by the track's artists
+          const similarGenres = data.genres.filter((g) =>
+            trackArtists.some((a) => a.genres.includes(g.name)),
+          );
 
-              return {
-                ...artist,
-                tracks: artistTracks,
-              };
-            });
+          // Matching artists, with their tracks in this playlist
+          const similarArtists = trackArtists.map((artist) => ({
+            ...artist,
+            tracks: data.tracks
+              .filter((t) => t.artistIds.includes(artist.id))
+              .map((t) => ({ id: t.id, name: t.name })),
+          }));
 
           if (similarGenres.length === 0 && similarArtists.length === 0) {
             return null;
           }
 
-          return {
-            playlist,
-            similarGenres,
-            similarArtists,
-          };
+          return { playlist, similarGenres, similarArtists };
         })
         .filter(
           (suggestion): suggestion is NonNullable<typeof suggestion> =>
-            suggestion !== null
+            suggestion !== null,
         )
         .sort((a, b) => {
-          // First sort by total track count of similar artists
-          const aArtistTrackCount = a.similarArtists.reduce(
-            (sum, artist) => sum + artist.trackCount,
-            0
-          );
-          const bArtistTrackCount = b.similarArtists.reduce(
-            (sum, artist) => sum + artist.trackCount,
-            0
-          );
-          const artistTrackDiff = bArtistTrackCount - aArtistTrackCount;
+          // First by total track count of similar artists, then genre count
+          const count = (s: typeof a) =>
+            s.similarArtists.reduce((sum, artist) => sum + artist.trackCount, 0);
+          const artistTrackDiff = count(b) - count(a);
           if (artistTrackDiff !== 0) return artistTrackDiff;
-
-          // Then sort by genre count
           return b.similarGenres.length - a.similarGenres.length;
         });
 
-      result.push({
-        track,
-        currentPlaylists,
-        suggestedPlaylists,
-      });
-    }
-
-    return result;
+      return { track, currentPlaylists, suggestedPlaylists };
+    });
   }
 
   calculatePlaylistConsistency(
@@ -205,6 +171,18 @@ export class PlaylistService {
     totalTracksInPlaylist: number,
     tracks: Track[]
   ) {
+    if (totalTracksInPlaylist <= 0) {
+      return {
+        consistencyScore: 100,
+        genreScore: 100,
+        timeScore: undefined,
+        outliers: [],
+        mainGenres: [],
+        totalArtists: artists.length,
+        timeAnalysis: undefined,
+      };
+    }
+
     // Pick "main" genres by cumulative coverage for stability:
     // include at least 3, stop when we cover ~60% of tracks, cap at 10.
     const minGenres = 3;

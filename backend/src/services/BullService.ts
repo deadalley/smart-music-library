@@ -1,99 +1,144 @@
-import { Job, Queue, Worker } from "bullmq";
+import { Job, JobType, Queue, Worker } from "bullmq";
+import { Redis as IORedis } from "ioredis";
 import {
   getPersistJobStatusMessage,
   PersistJobData,
   persistUserDataJob,
 } from "../jobs/persistUserData";
+import { redisClient } from "../redis";
 import { JobProgress, JobQueues, Jobs, JobStatus } from "../types";
-import type { MusicSource } from "./RedisService";
+import { MusicSource, RedisService } from "./RedisService";
+
+// Jobs that haven't reached a final state. "delayed" matters: between retry
+// attempts BullMQ parks a job there, and ignoring it made a sync that was
+// backing off look finished.
+const UNFINISHED_STATES: JobType[] = [
+  "waiting",
+  "active",
+  "delayed",
+  "prioritized",
+  "waiting-children",
+];
+
+const LOCK_TTL_SECONDS = 30;
+
+export function createBullConnection(url = process.env.REDIS_URL) {
+  // ioredis understands the full URL (username, password, db, rediss:// TLS).
+  // BullMQ requires maxRetriesPerRequest: null on its connections.
+  return new IORedis(url || "redis://localhost:6379", {
+    maxRetriesPerRequest: null,
+  });
+}
+
+export interface BullServiceOptions {
+  startWorker?: boolean;
+  attempts?: number;
+  backoffDelayMs?: number;
+  processor?: (job: Job<PersistJobData>) => Promise<unknown>;
+}
 
 export class BullService {
-  private persistQueue: Queue;
-  private persistWorker: Worker;
+  private persistQueue: Queue<PersistJobData>;
+  private persistWorker?: Worker<PersistJobData>;
+  private connection: IORedis;
+  private workerConnection?: IORedis;
+  private attempts: number;
+  private backoffDelayMs: number;
 
-  constructor() {
-    const connection = this.getRedisConnection();
+  constructor({
+    startWorker = true,
+    attempts = 3,
+    backoffDelayMs = 5000,
+    processor = (job) => persistUserDataJob(job),
+  }: BullServiceOptions = {}) {
+    this.connection = createBullConnection();
+    this.attempts = attempts;
+    this.backoffDelayMs = backoffDelayMs;
 
-    this.persistQueue = new Queue(JobQueues.PERSIST_USER_DATA, {
-      connection,
+    this.persistQueue = new Queue<PersistJobData>(JobQueues.PERSIST_USER_DATA, {
+      connection: this.connection,
     });
 
-    this.persistWorker = new Worker(
-      JobQueues.PERSIST_USER_DATA,
-      async (job: Job<PersistJobData>) => {
-        return persistUserDataJob(job);
-      },
-      {
-        connection,
-        concurrency: 1, // Process one persist job at a time
-      }
-    );
-
-    this.setupWorkerListeners();
+    if (startWorker) {
+      this.workerConnection = createBullConnection();
+      this.persistWorker = new Worker<PersistJobData>(
+        JobQueues.PERSIST_USER_DATA,
+        processor,
+        {
+          connection: this.workerConnection,
+          concurrency: 1, // Process one persist job at a time
+        },
+      );
+      this.setupWorkerListeners(this.persistWorker);
+    }
   }
 
-  private getRedisConnection(): {
-    host: string;
-    port: number;
-    password?: string;
-    tls?: Record<string, never>;
-  } {
-    const url = process.env.REDIS_URL;
-    if (!url) {
-      return { host: "localhost", port: 6379 };
+  private setupWorkerListeners(worker: Worker<PersistJobData>): void {
+    worker.on("completed", (job) => {
+      console.log(`Persist job ${job.id} completed for user ${job.data.userId}`);
+    });
+
+    worker.on("failed", (job, err) => {
+      console.error(
+        `Persist job ${job?.id} failed for user ${job?.data?.userId} (attempt ${job?.attemptsMade}):`,
+        err?.message,
+      );
+    });
+
+    worker.on("error", (err) => {
+      console.error("Persist worker error:", err);
+    });
+  }
+
+  private lastJobKey(userId: string, source: MusicSource) {
+    return RedisService.rootKey(userId, source, "last-job");
+  }
+
+  private lockKey(userId: string, source: MusicSource) {
+    return RedisService.rootKey(userId, source, "sync-lock");
+  }
+
+  async getActiveJob(
+    userId: string,
+    source: MusicSource = "yt-music",
+  ): Promise<string | null> {
+    // Fast path: the most recently enqueued job for this user.
+    const lastJobId = await redisClient.get(this.lastJobKey(userId, source));
+    if (lastJobId) {
+      const job = await this.persistQueue.getJob(lastJobId);
+      if (job) {
+        const state = await job.getState();
+        if ((UNFINISHED_STATES as string[]).includes(state)) return lastJobId;
+        return null;
+      }
     }
 
-    const parsed = new URL(url);
-    const password = parsed.password ? decodeURIComponent(parsed.password) : undefined;
-    return {
-      host: parsed.hostname,
-      port: parsed.port ? Number(parsed.port) : 6379,
-      ...(password ? { password } : {}),
-      // Upstash (and most managed Redis) requires TLS on rediss:// URLs
-      ...(parsed.protocol === "rediss:" ? { tls: {} } : {}),
-    };
+    const jobs = await this.persistQueue.getJobs(UNFINISHED_STATES);
+    const userJob = jobs.find(
+      (job) => job?.data.userId === userId && job.data.source === source,
+    );
+    return userJob?.id ?? null;
   }
 
-  private setupWorkerListeners(): void {
-    this.persistWorker.on("completed", (job) => {
-      console.log(
-        `Persist job ${job.id} completed for user ${job.data.userId}`
-      );
-    });
-
-    this.persistWorker.on("failed", (job, err) => {
-      console.error(
-        `Persist job ${job?.id} failed for user ${job?.data?.userId}:`,
-        err
-      );
-    });
-
-    this.persistWorker.on("progress", (job, progress) => {
-      console.log(`Persist job ${job.id} progress: ${progress}%`);
-    });
-  }
-
-  async getActiveJob(userId: string): Promise<string | null> {
-    const activeJobs = await this.persistQueue.getJobs(["waiting", "active"]);
-    const userJob = activeJobs.find((job) => job.data.userId === userId);
-    return userJob ? userJob.id! : null;
+  /** Status of the user's most recent job (finished or not), if any. */
+  async getLastJobStatus(
+    userId: string,
+    source: MusicSource = "yt-music",
+  ): Promise<(JobProgress & { jobId: string }) | null> {
+    const jobId = await redisClient.get(this.lastJobKey(userId, source));
+    if (!jobId) return null;
+    const status = await this.getJobStatus(jobId);
+    return status ? { ...status, jobId } : null;
   }
 
   async getJobStatus(jobId: string): Promise<JobProgress | null> {
     try {
       const job = await this.persistQueue.getJob(jobId);
-
-      if (!job) {
-        return null;
-      }
+      if (!job) return null;
 
       const state = await job.getState();
       let status: JobStatus;
-
       switch (state) {
-        case "waiting":
-          status = JobStatus.WAITING;
-          break;
         case "active":
           status = JobStatus.ACTIVE;
           break;
@@ -104,6 +149,7 @@ export class BullService {
           status = JobStatus.FAILED;
           break;
         default:
+          // waiting, delayed (between retries), prioritized, ...
           status = JobStatus.WAITING;
       }
 
@@ -111,13 +157,16 @@ export class BullService {
       const progress: JobProgress = {
         status,
         progress: progressValue,
-        message: getPersistJobStatusMessage(progressValue),
+        message:
+          state === "delayed"
+            ? "Retrying after an error..."
+            : getPersistJobStatusMessage(progressValue),
         startedAt: job.processedOn ? new Date(job.processedOn) : undefined,
         completedAt: job.finishedOn ? new Date(job.finishedOn) : undefined,
       };
 
-      if (status === JobStatus.FAILED && job.failedReason) {
-        progress.error = job.failedReason;
+      if (status === JobStatus.FAILED) {
+        progress.error = job.failedReason || "Sync failed";
       }
 
       return progress;
@@ -128,61 +177,54 @@ export class BullService {
   }
 
   async cleanup(): Promise<void> {
-    await this.persistWorker.close();
+    await this.persistWorker?.close();
     await this.persistQueue.close();
+    this.workerConnection?.disconnect();
+    this.connection.disconnect();
   }
 
-  // Jobs
   async startPersistJob(
     userId: string,
     accessToken: string,
     refreshToken: string | undefined,
-    source: MusicSource
-  ): Promise<string> {
-    // Check if there's already an active job for this user
-    const activeJobs = await this.persistQueue.getJobs(["waiting", "active"]);
-    const existingJob = activeJobs.find((job) => job.data.userId === userId);
+    source: MusicSource = "yt-music",
+  ): Promise<{ jobId: string; alreadyRunning: boolean }> {
+    // Short-lived lock so two concurrent requests can't both pass the
+    // "no active job" check and enqueue two syncs.
+    const lockKey = this.lockKey(userId, source);
+    const locked = await redisClient.set(lockKey, "1", {
+      NX: true,
+      EX: LOCK_TTL_SECONDS,
+    });
 
-    if (existingJob) {
-      return existingJob.id!;
-    }
-
-    // Create a new job
-    const job = await this.persistQueue.add(
-      Jobs.PERSIST_USER_DATA,
-      { userId, accessToken, refreshToken, source } satisfies PersistJobData,
-      {
-        attempts: 3,
-        backoff: {
-          type: "exponential",
-          delay: 2000,
-        },
-        removeOnComplete: 5, // Keep last 5 completed jobs
-        removeOnFail: 5, // Keep last 5 failed jobs
+    try {
+      if (!locked) {
+        const active = await this.getActiveJob(userId, source);
+        if (active) return { jobId: active, alreadyRunning: true };
+        throw new Error("A sync is already being started, try again shortly");
       }
-    );
 
-    return job.id!;
-  }
+      const existing = await this.getActiveJob(userId, source);
+      if (existing) return { jobId: existing, alreadyRunning: true };
 
-  async getPersistJobStatus(userId: string): Promise<JobProgress | null> {
-    const activeJobs = await this.persistQueue.getJobs([
-      "waiting",
-      "active",
-      "completed",
-      "failed",
-    ]);
-    const userJob = activeJobs.find((job) => job.data.userId === userId);
+      const job: Job<PersistJobData> = await this.persistQueue.add(
+        Jobs.PERSIST_USER_DATA,
+        { userId, accessToken, refreshToken, source },
+        {
+          attempts: this.attempts,
+          backoff: { type: "exponential", delay: this.backoffDelayMs },
+          removeOnComplete: { count: 100, age: 24 * 60 * 60 },
+          removeOnFail: { count: 100, age: 7 * 24 * 60 * 60 },
+        },
+      );
 
-    if (!userJob) {
-      return null;
+      await redisClient.set(this.lastJobKey(userId, source), job.id!, {
+        EX: 7 * 24 * 60 * 60,
+      });
+
+      return { jobId: job.id!, alreadyRunning: false };
+    } finally {
+      if (locked) await redisClient.del(lockKey);
     }
-
-    return this.getJobStatus(userJob.id!);
-  }
-
-  async getPersistJobStatusMessage(userId: string): Promise<string | null> {
-    const jobProgress = await this.getPersistJobStatus(userId);
-    return getPersistJobStatusMessage(jobProgress?.progress || 0);
   }
 }
