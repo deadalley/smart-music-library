@@ -12,6 +12,7 @@ import {
   PlaylistService,
   RedisService,
   SearchService,
+  StatsService,
   YouTubeService,
 } from "../services";
 import { LIKED_SONGS_PLAYLIST_ID } from "../services/RedisService";
@@ -172,6 +173,29 @@ router.get(
 
     res.json(await new SearchService(library).search(query));
   }),
+);
+
+router.get(
+  "/stats",
+  withLibrary("Failed to compute library statistics", async (_req, res, library) => {
+    res.json(await new StatsService(library).getLibraryStats());
+  }),
+);
+
+router.get(
+  "/playlists/:id/stats",
+  withLibrary(
+    "Failed to compute playlist statistics",
+    async (req, res, library) => {
+      const stats = await new StatsService(library).getPlaylistStats(
+        req.params.id,
+      );
+      if (!stats) {
+        return res.status(404).json({ error: "Playlist not found" });
+      }
+      res.json(stats);
+    },
+  ),
 );
 
 router.get(

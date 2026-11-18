@@ -3,9 +3,11 @@ import {
   AppUser,
   Artist,
   LibrarySearchResult,
+  LibraryStats,
   PersistResponse,
   Playlist,
   PlaylistAnalysisResult,
+  PlaylistStats,
   Track,
   TrackAggregationResult,
 } from "@smart-music-library/shared";
@@ -123,6 +125,13 @@ export const baseAPI = {
     api.post<Record<string, string[]>>("/tracks/playlist-memberships", {
       trackIds,
     }),
+
+  // Statistics
+  getLibraryStats: () => api.get<LibraryStats>("/stats"),
+  getPlaylistStats: (playlistId: string) =>
+    api.get<PlaylistStats>(
+      `/playlists/${encodeURIComponent(playlistId)}/stats`,
+    ),
 
   // Library search
   search: (query: string) =>

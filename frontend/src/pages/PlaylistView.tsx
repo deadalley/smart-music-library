@@ -8,6 +8,7 @@ import { Page } from "../components/Page";
 import { PlaylistAnalysisResult } from "../components/PlaylistAnalysisResult";
 import { PlaylistTypeSelector } from "../components/PlaylistTypeSelector";
 import { SourceLink } from "../components/SourceLink";
+import { PlaylistStatistics } from "../components/stats/PlaylistStatistics";
 import { TrackList } from "../components/TrackList";
 import { baseAPI } from "../services/api";
 import { formatDuration } from "../utils";
@@ -82,6 +83,8 @@ export function PlaylistView() {
           </div>
         }
       />
+
+      <PlaylistStatistics playlistId={id!} />
 
       <div className="flex gap-x-4">
         <div className="flex-1">

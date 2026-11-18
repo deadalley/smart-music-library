@@ -170,3 +170,67 @@ export interface LibrarySearchResult {
   artists: SearchResultGroup<Artist>;
   playlists: SearchResultGroup<Playlist>;
 }
+
+// Statistics
+export interface ArtistShare {
+  artist: Artist;
+  trackCount: number;
+  share: number; // 0-1, of the tracks considered
+}
+
+export interface DecadeShare {
+  decade: string; // e.g. "2010s"
+  count: number;
+  share: number; // 0-1, of tracks with a known year
+}
+
+export interface OwnershipBreakdown {
+  owned: number;
+  wishlist: number;
+  notOwned: number;
+  ownedShare: number; // 0-1
+}
+
+export interface TrackStats {
+  trackCount: number;
+  totalDurationMs: number;
+  averageDurationMs: number;
+  longestTrack: Track | null;
+  shortestTrack: Track | null;
+  uniqueArtistCount: number;
+  topArtists: ArtistShare[];
+  ownership: OwnershipBreakdown;
+  decades: DecadeShare[];
+  mostViewed: Track[];
+}
+
+export interface PlaylistRanking {
+  playlist: Playlist;
+  trackCount: number;
+  totalDurationMs: number;
+}
+
+export interface LibraryStats extends TrackStats {
+  playlistCount: number;
+  artistCount: number;
+  likedCount: number;
+  unsortedLikedCount: number; // liked songs that are in no playlist
+  multiPlaylistTrackCount: number; // tracks in 2+ playlists
+  averagePlaylistTrackCount: number;
+  playlistsByType: { type: PlaylistType | "untyped"; count: number }[];
+  largestPlaylists: PlaylistRanking[];
+  longestPlaylists: PlaylistRanking[];
+  lastSync?: string;
+}
+
+export interface PlaylistOverlap {
+  playlist: Playlist;
+  sharedCount: number;
+  share: number; // 0-1, of this playlist's tracks
+}
+
+export interface PlaylistStats extends TrackStats {
+  likedCount: number;
+  likedShare: number; // 0-1
+  overlaps: PlaylistOverlap[];
+}

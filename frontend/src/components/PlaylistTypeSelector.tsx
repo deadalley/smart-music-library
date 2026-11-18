@@ -20,6 +20,7 @@ export function PlaylistTypeSelector({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["playlist", playlistId] });
       queryClient.invalidateQueries({ queryKey: ["playlists"] });
+      queryClient.invalidateQueries({ queryKey: ["library-stats"] });
     },
   });
 

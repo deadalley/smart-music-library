@@ -11,6 +11,7 @@ import { Playlists } from "./pages/Playlists";
 import { PlaylistView } from "./pages/PlaylistView";
 import { SavedTracks } from "./pages/SavedTracks";
 import { Settings } from "./pages/Settings";
+import { Statistics } from "./pages/Statistics";
 import { SyncRequired } from "./pages/SyncRequired";
 import { Wishlist } from "./pages/Wishlist";
 import { Layout } from "./components/Layout";
@@ -32,6 +33,7 @@ function App() {
               <Route path="artists/:id" element={<ArtistView />} />
               <Route path="albums/:id" element={<AlbumView />} />
               <Route path="wishlist" element={<Wishlist />} />
+              <Route path="statistics" element={<Statistics />} />
               <Route path="settings" element={<Settings />} />
             </Route>
 

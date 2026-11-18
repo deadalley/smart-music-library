@@ -77,6 +77,8 @@ export function TrackList({
       // Invalidate queries to refresh data
       queryClient.invalidateQueries({ queryKey: ["saved-tracks"] });
       queryClient.invalidateQueries({ queryKey: ["aggregated-liked-songs"] });
+      queryClient.invalidateQueries({ queryKey: ["playlist-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["library-stats"] });
     },
     onError: (error) => {
       window.alert(
