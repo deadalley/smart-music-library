@@ -200,10 +200,12 @@ export function SearchDialog() {
         type="button"
         className="flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium text-base-content/70 hover:text-base-content hover:bg-base-300/50 transition-all duration-150"
         onClick={handleOpen}
+        title="Search"
+        aria-label="Search"
       >
-        <Search size={16} />
-        <span>Search</span>
-        <span className="flex items-center gap-0.5">
+        <Search size={16} className="shrink-0" />
+        <span className="hidden xl:inline">Search</span>
+        <span className="hidden lg:flex items-center gap-0.5">
           <kbd className="kbd kbd-sm">{isMacPlatform() ? "⌘" : "Ctrl"}</kbd>
           <kbd className="kbd kbd-sm">K</kbd>
         </span>

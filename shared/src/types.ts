@@ -72,11 +72,16 @@ export interface Artist {
   genres: string[];
 }
 
+// Where an album's releaseDate came from: the YouTube Music description
+// ("Released on" / ℗), a MusicBrainz lookup, or just the video upload date.
+export type ReleaseDateSource = "youtube" | "musicbrainz" | "upload";
+
 export interface Album {
   id: string;
   name: string;
   type: string;
   releaseDate?: string;
+  releaseDateSource?: ReleaseDateSource;
   totalTracks?: number;
   images?: Image[];
   externalUrls?: ExternalUrls;
@@ -169,4 +174,79 @@ export interface LibrarySearchResult {
   albums: SearchResultGroup<Album & { artistName: string | null }>;
   artists: SearchResultGroup<Artist>;
   playlists: SearchResultGroup<Playlist>;
+}
+
+// Statistics
+export interface ArtistShare {
+  artist: Artist;
+  trackCount: number;
+  share: number; // 0-1, of the tracks considered
+}
+
+export interface DecadeShare {
+  decade: string; // e.g. "2010s"
+  count: number;
+  share: number; // 0-1, of tracks with a known year
+}
+
+export interface OwnershipBreakdown {
+  owned: number;
+  wishlist: number;
+  notOwned: number;
+  ownedShare: number; // 0-1
+}
+
+export interface TrackStats {
+  trackCount: number;
+  totalDurationMs: number;
+  averageDurationMs: number;
+  longestTrack: Track | null;
+  shortestTrack: Track | null;
+  uniqueArtistCount: number;
+  topArtists: ArtistShare[];
+  ownership: OwnershipBreakdown;
+  decades: DecadeShare[]; // real release dates only
+  releaseDates: ReleaseDateCoverage;
+  mostViewed: Track[];
+}
+
+export interface PlaylistRanking {
+  playlist: Playlist;
+  trackCount: number;
+  totalDurationMs: number;
+}
+
+export interface ReleaseDateCoverage {
+  fromYouTube: number;
+  fromMusicBrainz: number;
+  unknown: number; // only the upload date is known
+  lookupPending: boolean;
+  // The library was last synced by a version without release-date support,
+  // so a resync is needed before any release years can show up.
+  needsResync: boolean;
+}
+
+export interface LibraryStats extends TrackStats {
+  playlistCount: number;
+  artistCount: number;
+  likedCount: number;
+  unsortedLikedCount: number; // liked songs that are in no playlist
+  multiPlaylistTrackCount: number; // tracks in 2+ playlists
+  averagePlaylistTrackCount: number;
+  playlistsByType: { type: PlaylistType | "untyped"; count: number }[];
+  largestPlaylists: PlaylistRanking[];
+  longestPlaylists: PlaylistRanking[];
+  lastSync?: string;
+}
+
+export interface PlaylistOverlap {
+  playlist: Playlist;
+  sharedCount: number;
+  share: number; // 0-1, of this playlist's tracks
+}
+
+export interface PlaylistStats extends TrackStats {
+  likedCount: number;
+  likedShare: number; // 0-1
+  overlaps: PlaylistOverlap[];
 }

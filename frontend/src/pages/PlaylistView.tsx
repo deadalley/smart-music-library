@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Clock, Music } from "lucide-react";
+import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { Empty } from "../components/Empty";
 import { Error } from "../components/Error";
@@ -8,12 +9,14 @@ import { Page } from "../components/Page";
 import { PlaylistAnalysisResult } from "../components/PlaylistAnalysisResult";
 import { PlaylistTypeSelector } from "../components/PlaylistTypeSelector";
 import { SourceLink } from "../components/SourceLink";
+import { PlaylistStatistics } from "../components/stats/PlaylistStatistics";
 import { TrackList } from "../components/TrackList";
 import { baseAPI } from "../services/api";
 import { formatDuration } from "../utils";
 
 export function PlaylistView() {
   const { id } = useParams<{ id: string }>();
+  const [statsOpen, setStatsOpen] = useState(true);
 
   const {
     data: playlist,
@@ -83,26 +86,47 @@ export function PlaylistView() {
         }
       />
 
-      <div className="flex gap-x-4">
-        <div className="flex-1">
+      {/* Large screens: tracks on the left, statistics in a sticky column on
+          the right (folding the statistics gives the tracks the full width).
+          Smaller screens: statistics first, then tracks, full width. */}
+      <div
+        className={`flex flex-col gap-6 ${
+          statsOpen
+            ? "xl:grid xl:grid-cols-[minmax(0,1fr)_24rem] 2xl:grid-cols-[minmax(0,1fr)_28rem] xl:items-start"
+            : ""
+        }`}
+      >
+        <aside
+          className={`flex flex-col gap-4 min-w-0 ${
+            statsOpen
+              ? "xl:order-2 xl:sticky xl:top-20 xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto"
+              : ""
+          }`}
+        >
+          <PlaylistStatistics
+            playlistId={id!}
+            open={statsOpen}
+            onOpenChange={setStatsOpen}
+          />
+
+          {/* Genre/consistency analysis needs artist genres, which YouTube
+              doesn't provide; only show it when there's something to show. */}
+          {genres.length > 0 && (
+            <PlaylistAnalysisResult
+              artists={artists}
+              genres={genres}
+              consistencyAnalysis={consistencyAnalysis}
+            />
+          )}
+        </aside>
+
+        <div className="min-w-0 xl:order-1">
           {tracks.length === 0 ? (
             <Empty Icon={Music}>No tracks found</Empty>
           ) : (
             <TrackList tracks={tracks} withOwnershipFilter />
           )}
         </div>
-
-        {/* Genre/consistency analysis needs artist genres, which YouTube
-            doesn't provide; only show it when there's something to show. */}
-        {genres.length > 0 && (
-          <div className="flex-1">
-            <PlaylistAnalysisResult
-              artists={artists}
-              genres={genres}
-              consistencyAnalysis={consistencyAnalysis}
-            />
-          </div>
-        )}
       </div>
     </Page>
   );

@@ -18,6 +18,8 @@ export interface YouTubeVideo {
   channelId: string;
   channelTitle: string;
   publishedAt?: string;
+  /** Video description; carries "Released on" / ℗ for YouTube Music tracks. */
+  description?: string;
   durationMs: number;
   thumbnails: youtube_v3.Schema$ThumbnailDetails | null;
   viewCount?: number;
@@ -37,6 +39,7 @@ function toYouTubeVideo(v: youtube_v3.Schema$Video): YouTubeVideo | null {
     channelId,
     channelTitle,
     publishedAt: v.snippet?.publishedAt ?? undefined,
+    description: v.snippet?.description ?? undefined,
     durationMs: parseISODurationToMs(v.contentDetails?.duration),
     thumbnails: v.snippet?.thumbnails ?? null,
     viewCount: v.statistics?.viewCount

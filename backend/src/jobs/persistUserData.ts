@@ -1,11 +1,14 @@
 import {
   Artist,
   Playlist,
+  ReleaseDateSource,
   Track,
   TrackOwnership,
 } from "@smart-music-library/shared";
 import { Job } from "bullmq";
+import { parseReleaseDateFromDescription } from "../lib/releaseDate";
 import { getErrorStatus } from "../lib/retry";
+import { getCachedReleaseDates } from "../services/MusicBrainzService";
 import {
   LIKED_SONGS_PLAYLIST_ID,
   MusicSource,
@@ -82,7 +85,27 @@ function calculateProgress({
   );
 }
 
-export function videoToTrack(v: YouTubeVideo): Track {
+/**
+ * Best known release date for a video: the YouTube Music description, then a
+ * cached MusicBrainz lookup (only used if earlier — descriptions of remasters
+ * carry the remaster's date), then the upload date.
+ */
+export function resolveReleaseDate(
+  v: YouTubeVideo,
+  cached?: string | null,
+): { releaseDate?: string; releaseDateSource?: ReleaseDateSource } {
+  const fromDescription = parseReleaseDateFromDescription(v.description);
+  if (fromDescription && (!cached || fromDescription <= cached)) {
+    return { releaseDate: fromDescription, releaseDateSource: "youtube" };
+  }
+  if (cached) return { releaseDate: cached, releaseDateSource: "musicbrainz" };
+  const upload = v.publishedAt?.slice(0, 10);
+  return upload
+    ? { releaseDate: upload, releaseDateSource: "upload" }
+    : {};
+}
+
+export function videoToTrack(v: YouTubeVideo, cachedReleaseDate?: string | null): Track {
   const artistName = v.channelTitle.replace(/ - Topic$/, "");
   return {
     id: v.id,
@@ -107,7 +130,7 @@ export function videoToTrack(v: YouTubeVideo): Track {
       id: `${v.channelId}:${v.id}`,
       name: artistName,
       type: "youtube",
-      releaseDate: v.publishedAt?.slice(0, 10),
+      ...resolveReleaseDate(v, cachedReleaseDate),
       images: convertYouTubeThumbnails(v.thumbnails),
       externalUrls: {
         spotify: `https://www.youtube.com/channel/${v.channelId}`,
@@ -160,6 +183,18 @@ export async function syncYouTubeLibrary({
       .filter((v): v is YouTubeVideo => !!v);
   };
 
+  // Release dates found by earlier MusicBrainz lookups (any user).
+  // Per-track release-date source, for the end-of-sync summary.
+  const releaseSources = new Map<string, ReleaseDateSource | "none">();
+  const toTracks = async (videos: YouTubeVideo[]): Promise<Track[]> => {
+    const cached = await getCachedReleaseDates(videos.map((v) => v.id));
+    return videos.map((v) => {
+      const track = videoToTrack(v, cached.get(v.id));
+      releaseSources.set(track.id, track.album.releaseDateSource ?? "none");
+      return track;
+    });
+  };
+
   const collect = (tracks: Track[]) => {
     for (const track of tracks) {
       trackIds.add(track.id);
@@ -170,11 +205,15 @@ export async function syncYouTubeLibrary({
   };
 
   // Liked songs -> virtual "liked-songs" playlist (music videos only).
-  const likedVideos = (await yt.listLikedVideos()).filter(
+  const allLikedVideos = await yt.listLikedVideos();
+  const likedVideos = allLikedVideos.filter(
     (v) => v.categoryId === YOUTUBE_MUSIC_CATEGORY_ID,
   );
+  console.log(
+    `Liked videos for user ${userId}: ${allLikedVideos.length} total, ${likedVideos.length} in the Music category`,
+  );
   likedVideos.forEach((v) => videoCache.set(v.id, v));
-  const likedTracks = likedVideos.map(videoToTrack);
+  const likedTracks = await toTracks(likedVideos);
   if (likedTracks.length > 0) {
     playlists.push({
       id: LIKED_SONGS_PLAYLIST_ID,
@@ -221,7 +260,7 @@ export async function syncYouTubeLibrary({
             .length / videos.length;
 
     if (musicRatio >= MIN_MUSIC_RATIO) {
-      const tracks = videos.map(videoToTrack);
+      const tracks = await toTracks(videos);
       playlists.push({
         id: p.id,
         name: p.title,
@@ -271,6 +310,12 @@ export async function syncYouTubeLibrary({
   await store.storeArtists(artists);
   await reportProgress(JobProgressPercentage.ARTISTS_STORED);
 
+  const sourceCounts = { youtube: 0, musicbrainz: 0, upload: 0, none: 0 };
+  releaseSources.forEach((s) => (sourceCounts[s] += 1));
+  console.log(
+    `Release dates for user ${userId}: ${sourceCounts.youtube} from YouTube Music descriptions, ${sourceCounts.musicbrainz} from the MusicBrainz cache, ${sourceCounts.upload + sourceCounts.none} upload-date only`,
+  );
+
   const result: SyncResult = {
     playlistCount: playlists.length,
     trackCount: trackIds.size,
@@ -295,9 +340,15 @@ const defaultYouTubeFactory: YouTubeServiceFactory = (data) =>
     refresh_token: data.refreshToken,
   });
 
+export interface PersistHooks {
+  /** Called once the new library generation is live. */
+  onActivated?: (userId: string) => Promise<void>;
+}
+
 export async function persistUserDataJob(
   job: Job<PersistJobData>,
   createYouTubeService: YouTubeServiceFactory = defaultYouTubeFactory,
+  hooks: PersistHooks = {},
 ): Promise<SyncResult> {
   const { userId, source } = job.data;
   if (source !== "yt-music") {
@@ -321,6 +372,13 @@ export async function persistUserDataJob(
 
     await RedisService.activateGeneration(userId, generation, source);
     await job.updateProgress(JobProgressPercentage.COMPLETED);
+
+    if (hooks.onActivated) {
+      // Follow-up work (release-date lookups) must never fail the sync.
+      await hooks.onActivated(userId).catch((hookError) => {
+        console.error("Post-sync hook failed:", hookError);
+      });
+    }
 
     console.log(
       `YouTube sync completed for user ${userId}: ${result.playlistCount} playlists, ${result.trackCount} tracks, ${result.artistCount} artists, ${result.skippedPlaylists} skipped`,

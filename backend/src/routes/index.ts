@@ -12,8 +12,10 @@ import {
   PlaylistService,
   RedisService,
   SearchService,
+  StatsService,
   YouTubeService,
 } from "../services";
+import { parseDecade } from "../services/StatsService";
 import { LIKED_SONGS_PLAYLIST_ID } from "../services/RedisService";
 
 const router: Router = Router();
@@ -172,6 +174,54 @@ router.get(
 
     res.json(await new SearchService(library).search(query));
   }),
+);
+
+router.get(
+  "/stats",
+  withLibrary("Failed to compute library statistics", async (_req, res, library) => {
+    res.json(await new StatsService(library).getLibraryStats());
+  }),
+);
+
+router.get(
+  "/decades/:decade/tracks",
+  withLibrary("Failed to fetch decade tracks", async (req, res, library) => {
+    const decade = parseDecade(req.params.decade);
+    if (decade === null) {
+      return res
+        .status(400)
+        .json({ error: "Decade must look like 1990 or 1990s (1900-2090)" });
+    }
+    const playlistId =
+      typeof req.query.playlist === "string" && req.query.playlist
+        ? req.query.playlist
+        : undefined;
+
+    const tracks = await new StatsService(library).getDecadeTracks(
+      decade,
+      playlistId,
+    );
+    if (!tracks) {
+      return res.status(404).json({ error: "Playlist not found" });
+    }
+    res.json(tracks);
+  }),
+);
+
+router.get(
+  "/playlists/:id/stats",
+  withLibrary(
+    "Failed to compute playlist statistics",
+    async (req, res, library) => {
+      const stats = await new StatsService(library).getPlaylistStats(
+        req.params.id,
+      );
+      if (!stats) {
+        return res.status(404).json({ error: "Playlist not found" });
+      }
+      res.json(stats);
+    },
+  ),
 );
 
 router.get(

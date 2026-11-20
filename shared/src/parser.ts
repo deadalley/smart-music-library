@@ -4,6 +4,7 @@ import {
   ExternalUrls,
   Playlist,
   PlaylistType,
+  ReleaseDateSource,
   Track,
   TrackOwnership,
 } from "./types";
@@ -39,6 +40,12 @@ const TRACK_OWNERSHIP_STATES = new Set<string>(Object.values(TrackOwnership));
 
 export function isPlaylistType(value: unknown): value is PlaylistType {
   return typeof value === "string" && PLAYLIST_TYPES.has(value);
+}
+
+export function isReleaseDateSource(
+  value: unknown,
+): value is ReleaseDateSource {
+  return value === "youtube" || value === "musicbrainz" || value === "upload";
 }
 
 export function isTrackOwnership(value: unknown): value is TrackOwnership {
@@ -90,6 +97,7 @@ export function convertToRedisAlbum(album: Album): Record<string, string> {
     name: album.name,
     type: album.type,
     releaseDate: album.releaseDate || "",
+    releaseDateSource: album.releaseDateSource || "",
     totalTracks: album.totalTracks?.toString() || "",
     images: JSON.stringify(album.images || []),
     externalUrls: JSON.stringify(album.externalUrls || EMPTY_EXTERNAL_URLS),
@@ -163,6 +171,12 @@ export function convertFromRedisAlbum(data: Record<string, string>): Album {
     name: data.name || "",
     type: data.type || "",
     releaseDate: data.releaseDate || undefined,
+    // Data synced before sources were tracked only ever had upload dates.
+    releaseDateSource: isReleaseDateSource(data.releaseDateSource)
+      ? data.releaseDateSource
+      : data.releaseDate
+        ? "upload"
+        : undefined,
     totalTracks: data.totalTracks ? safeInt(data.totalTracks) : undefined,
     images: safeJsonParse(data.images, []),
     externalUrls: safeJsonParse(data.externalUrls, EMPTY_EXTERNAL_URLS),

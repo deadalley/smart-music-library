@@ -16,6 +16,9 @@ services:
       # Public URL of the Netlify site (used for CORS + OAuth redirects back to the app)
       - key: CLIENT_URL
         sync: false
+      # Contact (URL or email) sent to MusicBrainz in the User-Agent
+      - key: MUSICBRAINZ_CONTACT
+        sync: false
       # Signs the session cookie; must be >= 32 random characters
       - key: COOKIE_SECRET
         generateValue: true

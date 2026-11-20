@@ -61,7 +61,9 @@ Start the local development server (Redis must be running)
 pnpm dev
 ```
 
-This will start:
+This builds the `shared` package first (the backend imports its compiled
+output), then keeps it rebuilt in watch mode and restarts the backend when it
+changes. It will start:
 
 - Frontend: http://localhost:5173
 - Backend: http://127.0.0.1:3001
@@ -141,6 +143,17 @@ separately and survive resyncs.
 ### Search
 
 - `GET /api/search?q=` - Search across the cached library
+
+### Statistics
+
+- `GET /api/stats` - Library statistics
+- `GET /api/playlists/:id/stats` - Statistics for one playlist
+
+Release years come from the YouTube Music track description ("Released on" /
+℗) when available. Other tracks (music videos, fan uploads) are looked up on
+MusicBrainz in the background after a sync, at most one request per second,
+and cached for every user. Set `MUSICBRAINZ_CONTACT` to identify your
+deployment to MusicBrainz, or `MUSICBRAINZ_ENABLED=false` to turn lookups off.
 
 ### Health
 

@@ -21,6 +21,8 @@ export function SaveInPlaylist({
       queryClient.invalidateQueries({ queryKey: ["playlist", playlistId] });
       queryClient.invalidateQueries({ queryKey: ["aggregated-liked-songs"] });
       queryClient.invalidateQueries({ queryKey: ["saved-tracks"] });
+      queryClient.invalidateQueries({ queryKey: ["playlist-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["library-stats"] });
     },
   });
 
