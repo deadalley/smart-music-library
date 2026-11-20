@@ -4,7 +4,7 @@
   "description": "Express backend for Smart Music Library (YouTube Music)",
   "main": "dist/server.js",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "tsx watch --include \"../shared/dist/**\" src/server.ts",
     "build": "tsc --noEmit && tsup",
     "start": "node dist/server.js",
     "lint": "eslint .",

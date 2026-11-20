@@ -61,7 +61,9 @@ Start the local development server (Redis must be running)
 pnpm dev
 ```
 
-This will start:
+This builds the `shared` package first (the backend imports its compiled
+output), then keeps it rebuilt in watch mode and restarts the backend when it
+changes. It will start:
 
 - Frontend: http://localhost:5173
 - Backend: http://127.0.0.1:3001

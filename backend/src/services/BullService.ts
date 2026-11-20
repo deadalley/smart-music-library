@@ -285,12 +285,19 @@ export class BullService {
     userId: string,
     source: MusicSource = "yt-music",
   ): Promise<boolean> {
-    if (!isMusicBrainzEnabled()) return false;
+    if (!isMusicBrainzEnabled()) {
+      console.log(
+        `Release-date lookups disabled (MUSICBRAINZ_ENABLED=false); skipping for user ${userId}`,
+      );
+      return false;
+    }
     const library = new RedisService(userId, null, source);
     if (!(await library.claimReleaseLookup(LOOKUP_FLAG_TTL_SECONDS))) {
+      console.log(`Release-date lookups already pending for user ${userId}`);
       return false;
     }
     await this.enqueueEnrichment({ userId, source });
+    console.log(`Release-date lookups queued for user ${userId}`);
     return true;
   }
 

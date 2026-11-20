@@ -221,6 +221,9 @@ export interface ReleaseDateCoverage {
   fromMusicBrainz: number;
   unknown: number; // only the upload date is known
   lookupPending: boolean;
+  // The library was last synced by a version without release-date support,
+  // so a resync is needed before any release years can show up.
+  needsResync: boolean;
 }
 
 export interface LibraryStats extends TrackStats {

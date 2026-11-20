@@ -6,7 +6,7 @@ import {
   ReleaseDateCoverage,
   Track,
 } from "@smart-music-library/shared";
-import { LucideIcon } from "lucide-react";
+import { LucideIcon, RefreshCw } from "lucide-react";
 import { ReactNode, useState } from "react";
 import { Link } from "react-router-dom";
 import { formatDuration } from "../../utils";
@@ -321,6 +321,11 @@ export function TopArtistsCard({
   );
 }
 
+// The sync modal lives in the navbar; open it from anywhere.
+function openSyncModal() {
+  (document.getElementById("syncModal") as HTMLDialogElement | null)?.showModal();
+}
+
 export function DecadesCard({
   decades,
   releaseDates,
@@ -344,11 +349,28 @@ export function DecadesCard({
         ) : undefined
       }
     >
-      {decades.length === 0 ? (
+      {releaseDates.needsResync ? (
+        <div role="status" className="alert alert-info alert-soft items-start">
+          <RefreshCw className="size-4 mt-0.5 shrink-0" />
+          <div className="flex flex-col gap-2">
+            <span className="text-sm">
+              Release years are fetched during sync. Sync your library to see
+              when your music came out.
+            </span>
+            <button
+              type="button"
+              className="btn btn-info btn-sm self-start"
+              onClick={openSyncModal}
+            >
+              Sync now
+            </button>
+          </div>
+        </div>
+      ) : decades.length === 0 ? (
         <p className="text-sm text-base-content/60">
           {releaseDates.lookupPending
             ? "Looking up release years…"
-            : "No release years known yet."}
+            : "No release years found yet."}
         </p>
       ) : (
         <ul className="flex flex-col gap-3">
@@ -363,7 +385,7 @@ export function DecadesCard({
           ))}
         </ul>
       )}
-      {total > 0 && (
+      {total > 0 && !releaseDates.needsResync && (
         <p
           className="mt-auto text-xs text-base-content/60 tooltip tooltip-top text-left"
           data-tip={`${formatCount(releaseDates.fromYouTube)} from YouTube Music, ${formatCount(

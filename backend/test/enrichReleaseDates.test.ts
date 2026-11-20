@@ -117,6 +117,7 @@ describe.skipIf(!hasRedis)("release dates (Redis integration)", () => {
       fromMusicBrainz: 1,
       unknown: 2,
       lookupPending: true,
+      needsResync: false,
     });
     expect(stats.decades.map((d) => d.decade)).toEqual(["1970s"]);
 
@@ -156,6 +157,22 @@ describe.skipIf(!hasRedis)("release dates (Redis integration)", () => {
     lib = await RedisService.forUser(USER);
     const resynced = (await lib.getPlaylistTracks("PL1")).find((t) => t.id === "t2");
     expect(resynced?.album.releaseDateSource).toBe("musicbrainz");
+  });
+
+  it("asks for a resync when the library predates release-date support", async () => {
+    await persistUserDataJob(syncJob(), () => fakeYouTube(library()));
+    const lib = await RedisService.forUser(USER);
+    // Simulate meta written by an older version: no release-date marker.
+    await redisClient.hDel(`smart-spotify:${USER}:yt-music:g:${lib.generation}:meta`, "releaseDates");
+
+    let stats = await new StatsService(lib).getLibraryStats();
+    expect(stats.releaseDates.needsResync).toBe(true);
+    expect((await new StatsService(lib).getPlaylistStats("PL1"))!.releaseDates.needsResync).toBe(true);
+
+    await persistUserDataJob(syncJob(), () => fakeYouTube(library()));
+    stats = await new StatsService(await RedisService.forUser(USER)).getLibraryStats();
+    expect(stats.releaseDates.needsResync).toBe(false);
+    expect(stats.releaseDates.fromYouTube).toBeGreaterThan(0);
   });
 
   it("processes large libraries in batches and queues the next one", async () => {

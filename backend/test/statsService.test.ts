@@ -82,6 +82,7 @@ describe("computeTrackStats", () => {
       fromMusicBrainz: 0,
       unknown: 1,
       lookupPending: false,
+      needsResync: false,
     });
   });
 });

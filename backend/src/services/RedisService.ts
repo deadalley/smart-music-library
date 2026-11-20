@@ -41,6 +41,8 @@ const WRITE_CHUNK_SIZE = 200;
 export const LIKED_SONGS_PLAYLIST_ID = "liked-songs";
 
 export interface SyncMeta {
+  /** True when written by a sync that records release-date sources. */
+  hasReleaseDates?: boolean;
   lastSync: string;
   playlistCount: number;
   trackCount: number;
@@ -276,6 +278,7 @@ export class RedisService {
         trackCount: String(meta.trackCount),
         artistCount: String(meta.artistCount),
         skippedPlaylists: String(meta.skippedPlaylists),
+        releaseDates: "1",
       })
       .expire(metaKey, LIBRARY_TTL_SECONDS)
       // Kept without a TTL so we can tell "never synced" apart from
@@ -298,6 +301,7 @@ export class RedisService {
       trackCount: Number(data.trackCount || 0),
       artistCount: Number(data.artistCount || 0),
       skippedPlaylists: Number(data.skippedPlaylists || 0),
+      hasReleaseDates: data.releaseDates === "1",
     };
   }
 

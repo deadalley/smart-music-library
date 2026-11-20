@@ -184,9 +184,15 @@ export async function syncYouTubeLibrary({
   };
 
   // Release dates found by earlier MusicBrainz lookups (any user).
+  // Per-track release-date source, for the end-of-sync summary.
+  const releaseSources = new Map<string, ReleaseDateSource | "none">();
   const toTracks = async (videos: YouTubeVideo[]): Promise<Track[]> => {
     const cached = await getCachedReleaseDates(videos.map((v) => v.id));
-    return videos.map((v) => videoToTrack(v, cached.get(v.id)));
+    return videos.map((v) => {
+      const track = videoToTrack(v, cached.get(v.id));
+      releaseSources.set(track.id, track.album.releaseDateSource ?? "none");
+      return track;
+    });
   };
 
   const collect = (tracks: Track[]) => {
@@ -303,6 +309,12 @@ export async function syncYouTubeLibrary({
 
   await store.storeArtists(artists);
   await reportProgress(JobProgressPercentage.ARTISTS_STORED);
+
+  const sourceCounts = { youtube: 0, musicbrainz: 0, upload: 0, none: 0 };
+  releaseSources.forEach((s) => (sourceCounts[s] += 1));
+  console.log(
+    `Release dates for user ${userId}: ${sourceCounts.youtube} from YouTube Music descriptions, ${sourceCounts.musicbrainz} from the MusicBrainz cache, ${sourceCounts.upload + sourceCounts.none} upload-date only`,
+  );
 
   const result: SyncResult = {
     playlistCount: playlists.length,

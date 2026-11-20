@@ -59,6 +59,7 @@ export function computeTrackStats(
     fromMusicBrainz: 0,
     unknown: 0,
     lookupPending: false,
+    needsResync: false,
   };
 
   for (const track of tracks) {
@@ -203,6 +204,7 @@ export class StatsService {
 
     const trackStats = computeTrackStats(tracks, artistsById);
     trackStats.releaseDates.lookupPending = lookupPending;
+    trackStats.releaseDates.needsResync = !!meta && !meta.hasReleaseDates;
 
     return {
       ...trackStats,
@@ -235,12 +237,13 @@ export class StatsService {
     const playlist = await this.library.getPlaylist(playlistId);
     if (!playlist) return null;
 
-    const [tracks, artistsById, allPlaylists, lookupPending] =
+    const [tracks, artistsById, allPlaylists, lookupPending, meta] =
       await Promise.all([
         this.library.getPlaylistTracks(playlistId),
         this.loadArtistsById(),
         this.library.getUserPlaylists(),
         this.library.isReleaseLookupPending(),
+        this.library.getSyncMeta(),
       ]);
     const memberships = await this.library.getTrackPlaylistMemberships(
       tracks.map((t) => t.id),
@@ -275,6 +278,7 @@ export class StatsService {
 
     const trackStats = computeTrackStats(tracks, artistsById);
     trackStats.releaseDates.lookupPending = lookupPending;
+    trackStats.releaseDates.needsResync = !!meta && !meta.hasReleaseDates;
 
     return {
       ...trackStats,

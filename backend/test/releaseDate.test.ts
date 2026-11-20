@@ -25,6 +25,16 @@ describe("parseReleaseDateFromDescription", () => {
     expect(parseReleaseDateFromDescription(TOPIC_DESCRIPTION)).toBe("2013-02-12");
   });
 
+  it("copes with Windows line endings and non-breaking spaces", () => {
+    const messy = TOPIC_DESCRIPTION.replace(/\n/g, "\r\n")
+      .replace("Released on: ", "Released on:\u00a0")
+      .replace("℗ 2013", "℗\u00a02013");
+    expect(parseReleaseDateFromDescription(messy)).toBe("2013-02-12");
+    expect(
+      parseReleaseDateFromDescription("Provided to YouTube by X\r\n\r\n℗\u00a01979 Label"),
+    ).toBe("1979");
+  });
+
   it("falls back to the ℗ year", () => {
     expect(parseReleaseDateFromDescription("℗ 1983 RCA Records")).toBe("1983");
     expect(parseReleaseDateFromDescription("(P) 1971 Atlantic")).toBe("1971");
