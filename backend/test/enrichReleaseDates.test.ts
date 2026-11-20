@@ -1,4 +1,8 @@
 import type { Job } from "bullmq";
+import request from "supertest";
+import { createApp } from "../src/app";
+import type { BullService } from "../src/services/BullService";
+import { YouTubeService } from "../src/services/YouTubeService";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { enrichReleaseDatesJob } from "../src/jobs/enrichReleaseDates";
 import { PersistJobData, persistUserDataJob } from "../src/jobs/persistUserData";
@@ -157,6 +161,51 @@ describe.skipIf(!hasRedis)("release dates (Redis integration)", () => {
     lib = await RedisService.forUser(USER);
     const resynced = (await lib.getPlaylistTracks("PL1")).find((t) => t.id === "t2");
     expect(resynced?.album.releaseDateSource).toBe("musicbrainz");
+  });
+
+  it("lists a decade's tracks, library-wide or per playlist, matching the stats", async () => {
+    await cacheReleaseDate("t3", "1975-10-31");
+    await persistUserDataJob(syncJob(), () =>
+      fakeYouTube({
+        liked: [],
+        playlists: [
+          ...library().playlists,
+          {
+            id: "PL2",
+            title: "Other",
+            videos: [{ ...video("t5", "X - Topic"), title: "Later", description: "Released on: 1979-01-01" }],
+          },
+        ],
+      }),
+    );
+
+    vi.spyOn(YouTubeService.prototype, "getMyChannel").mockResolvedValue({
+      id: USER,
+      title: "me",
+      thumbnails: null,
+    });
+    const app = createApp({ bullService: {} as BullService, cookieSecret: "s".repeat(40) });
+    const get = (path: string) =>
+      request(app).get(path).set("Cookie", ["youtube_access_token=tok"]);
+
+    const all = await get("/api/decades/1970s/tracks");
+    expect(all.status).toBe(200);
+    // t1 (1972, description) and t3 (1975, MusicBrainz cache), t5 (1979);
+    // t2/t4 only have upload dates and are excluded. Oldest first.
+    expect(all.body.map((t: { id: string }) => t.id)).toEqual(["t1", "t3", "t5"]);
+
+    const stats = await get("/api/stats");
+    const seventies = stats.body.decades.find((d: { decade: string }) => d.decade === "1970s");
+    expect(seventies.count).toBe(all.body.length);
+
+    const inPlaylist = await get("/api/decades/1970/tracks?playlist=PL1");
+    expect(inPlaylist.body.map((t: { id: string }) => t.id)).toEqual(["t1", "t3"]);
+
+    expect((await get("/api/decades/1995/tracks")).status).toBe(400);
+    expect((await get("/api/decades/abc/tracks")).status).toBe(400);
+    expect((await get("/api/decades/1970s/tracks?playlist=nope")).status).toBe(404);
+    expect((await get("/api/decades/1950s/tracks")).body).toEqual([]);
+    vi.restoreAllMocks();
   });
 
   it("asks for a resync when the library predates release-date support", async () => {

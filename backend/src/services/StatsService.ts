@@ -23,11 +23,25 @@ const share = (part: number, total: number) => (total > 0 ? part / total : 0);
 
 // Only real release dates count towards eras; an upload date says when a
 // video was posted, not when the music came out.
-function releaseYear(track: Track): number | undefined {
+export function releaseYear(track: Track): number | undefined {
   const source = track.album?.releaseDateSource;
   if (source !== "youtube" && source !== "musicbrainz") return undefined;
   const year = parseInt(track.album?.releaseDate?.slice(0, 4) ?? "", 10);
   return Number.isFinite(year) && year > 1800 ? year : undefined;
+}
+
+/** Decade (e.g. 1990) of a track's real release date, if known. */
+export function trackDecade(track: Track): number | undefined {
+  const year = releaseYear(track);
+  return year === undefined ? undefined : Math.floor(year / 10) * 10;
+}
+
+/** Parses "1990" or "1990s"; null unless it's a decade from 1900 to 2090. */
+export function parseDecade(value: string): number | null {
+  const match = /^(\d{4})s?$/.exec(value.trim());
+  if (!match) return null;
+  const decade = Number(match[1]);
+  return decade % 10 === 0 && decade >= 1900 && decade <= 2090 ? decade : null;
 }
 
 /**
@@ -89,10 +103,9 @@ export function computeTrackStats(
     else if (source === "musicbrainz") releaseDates.fromMusicBrainz += 1;
     else releaseDates.unknown += 1;
 
-    const year = releaseYear(track);
-    if (year !== undefined) {
+    const decade = trackDecade(track);
+    if (decade !== undefined) {
       tracksWithYear += 1;
-      const decade = Math.floor(year / 10) * 10;
       decadeCounts.set(decade, (decadeCounts.get(decade) ?? 0) + 1);
     }
   }
@@ -231,6 +244,31 @@ export class StatsService {
         .slice(0, TOP_PLAYLISTS),
       lastSync: meta?.lastSync,
     };
+  }
+
+  /**
+   * Tracks released in a decade, from the whole library or one playlist;
+   * null if the playlist doesn't exist. Oldest first, then by name.
+   */
+  async getDecadeTracks(
+    decade: number,
+    playlistId?: string,
+  ): Promise<Track[] | null> {
+    let tracks: Track[];
+    if (playlistId) {
+      if (!(await this.library.getPlaylist(playlistId))) return null;
+      tracks = await this.library.getPlaylistTracks(playlistId);
+    } else {
+      tracks = await this.library.getUserTracks();
+    }
+
+    return tracks
+      .filter((t) => trackDecade(t) === decade)
+      .sort(
+        (a, b) =>
+          (a.album.releaseDate ?? "").localeCompare(b.album.releaseDate ?? "") ||
+          a.name.localeCompare(b.name),
+      );
   }
 
   async getPlaylistStats(playlistId: string): Promise<PlaylistStats | null> {

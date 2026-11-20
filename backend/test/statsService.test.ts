@@ -7,7 +7,12 @@ import { PersistJobData, persistUserDataJob } from "../src/jobs/persistUserData"
 import { redisClient } from "../src/redis";
 import type { BullService } from "../src/services/BullService";
 import { RedisService } from "../src/services/RedisService";
-import { computeTrackStats, StatsService } from "../src/services/StatsService";
+import {
+  computeTrackStats,
+  parseDecade,
+  StatsService,
+  trackDecade,
+} from "../src/services/StatsService";
 import { YouTubeService } from "../src/services/YouTubeService";
 import { makeTrack } from "./fixtures";
 import { hasRedis, resetRedis } from "./helpers";
@@ -84,6 +89,28 @@ describe("computeTrackStats", () => {
       lookupPending: false,
       needsResync: false,
     });
+  });
+});
+
+describe("decade helpers", () => {
+  it("maps real release years to decades and ignores upload-only dates", () => {
+    expect(trackDecade(withYear("a", 1994))).toBe(1990);
+    expect(trackDecade(withYear("b", 2000))).toBe(2000);
+    expect(
+      trackDecade(
+        makeTrack("c", {
+          album: { id: "x", name: "", type: "youtube", releaseDate: "2016-01-01", releaseDateSource: "upload" },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("parses decade parameters", () => {
+    expect(parseDecade("1990s")).toBe(1990);
+    expect(parseDecade("1970")).toBe(1970);
+    expect(parseDecade("1995")).toBeNull();
+    expect(parseDecade("abc")).toBeNull();
+    expect(parseDecade("1800s")).toBeNull();
   });
 });
 

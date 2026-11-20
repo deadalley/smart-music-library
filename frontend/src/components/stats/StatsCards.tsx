@@ -61,37 +61,41 @@ export type StatTile = {
 };
 
 export function StatTiles({ tiles }: { tiles: StatTile[] }) {
+  // Sized by its container, not the viewport, so the same tiles work full
+  // width (one row) and in a narrow side column (compact two-column grid).
   return (
-    <div className="stats stats-vertical sm:stats-horizontal bg-base-100 border border-base-200 shadow-sm w-full overflow-x-auto">
-      {tiles.map(({ title, value, description, Icon, to }) => {
-        const content = (
-          <>
-            {Icon && (
-              <div className="stat-figure text-primary">
-                <Icon className="size-7" />
+    <div className="@container w-full">
+      <div className="stats stats-vertical grid-cols-2 @xl:stats-horizontal @xl:grid-cols-none bg-base-100 border border-base-200 shadow-sm w-full overflow-x-auto @max-xl:[&_.stat]:px-4 @max-xl:[&_.stat]:py-3 @max-xl:[&_.stat-value]:text-xl @max-xl:[&_.stat-figure_svg]:size-5">
+        {tiles.map(({ title, value, description, Icon, to }) => {
+          const content = (
+            <>
+              {Icon && (
+                <div className="stat-figure text-primary">
+                  <Icon className="size-7" />
+                </div>
+              )}
+              <div className="stat-title">{title}</div>
+              <div className="stat-value text-2xl lg:text-3xl tabular-nums">
+                {value}
               </div>
-            )}
-            <div className="stat-title">{title}</div>
-            <div className="stat-value text-2xl lg:text-3xl tabular-nums">
-              {value}
+              {description && <div className="stat-desc">{description}</div>}
+            </>
+          );
+          return to ? (
+            <Link
+              key={title}
+              to={to}
+              className="stat hover:bg-base-200/60 transition-colors"
+            >
+              {content}
+            </Link>
+          ) : (
+            <div key={title} className="stat">
+              {content}
             </div>
-            {description && <div className="stat-desc">{description}</div>}
-          </>
-        );
-        return to ? (
-          <Link
-            key={title}
-            to={to}
-            className="stat hover:bg-base-200/60 transition-colors"
-          >
-            {content}
-          </Link>
-        ) : (
-          <div key={title} className="stat">
-            {content}
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -218,7 +222,9 @@ export function OwnershipCard({
               <button
                 type="button"
                 className={`w-full rounded-box px-2 py-1.5 text-left transition-colors ${
-                  active === segment.key ? "bg-base-200" : "hover:bg-base-200/60"
+                  active === segment.key
+                    ? "bg-base-200"
+                    : "hover:bg-base-200/60"
                 }`}
                 onMouseEnter={() => setActive(segment.key)}
                 onMouseLeave={() => setActive(null)}
@@ -259,18 +265,25 @@ function BarRow({
   value,
   share,
   max,
+  to,
+  ariaLabel,
 }: {
   label: ReactNode;
   value: ReactNode;
   share: number;
   max: number;
+  /** Makes the whole row (label, value and bar) a link. */
+  to?: string;
+  ariaLabel?: string;
 }) {
   // Scale bars to the largest entry so small libraries still show contrast.
   const scaled = max > 0 ? (share / max) * 100 : 0;
-  return (
-    <li className="flex flex-col gap-1">
+  const content = (
+    <>
       <div className="flex items-center justify-between gap-3 text-sm">
-        <span className="truncate min-w-0">{label}</span>
+        <span className="truncate min-w-0 transition-colors group-hover:text-primary">
+          {label}
+        </span>
         <span className="text-base-content/60 tabular-nums shrink-0">
           {value}
         </span>
@@ -280,6 +293,22 @@ function BarRow({
         value={scaled}
         max={100}
       />
+    </>
+  );
+
+  if (!to) {
+    return <li className="flex flex-col gap-1">{content}</li>;
+  }
+
+  return (
+    <li>
+      <Link
+        to={to}
+        aria-label={ariaLabel}
+        className="group -mx-2 flex flex-col gap-1 rounded-box px-2 py-1 transition-colors hover:bg-base-200/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+      >
+        {content}
+      </Link>
     </li>
   );
 }
@@ -323,16 +352,25 @@ export function TopArtistsCard({
 
 // The sync modal lives in the navbar; open it from anywhere.
 function openSyncModal() {
-  (document.getElementById("syncModal") as HTMLDialogElement | null)?.showModal();
+  (
+    document.getElementById("syncModal") as HTMLDialogElement | null
+  )?.showModal();
 }
 
 export function DecadesCard({
   decades,
   releaseDates,
+  playlistId,
 }: {
   decades: DecadeShare[];
   releaseDates: ReleaseDateCoverage;
+  /** Scope decade links to this playlist. */
+  playlistId?: string;
 }) {
+  const decadeLink = (decade: string) =>
+    `/decades/${decade}${
+      playlistId ? `?playlist=${encodeURIComponent(playlistId)}` : ""
+    }`;
   const max = Math.max(0, ...decades.map((d) => d.share));
   const known = releaseDates.fromYouTube + releaseDates.fromMusicBrainz;
   const total = known + releaseDates.unknown;
@@ -381,6 +419,8 @@ export function DecadesCard({
               value={`${formatCount(count)} · ${formatPercent(share)}`}
               share={share}
               max={max}
+              to={decadeLink(decade)}
+              ariaLabel={`${decade}: ${formatCount(count)} track${count === 1 ? "" : "s"}`}
             />
           ))}
         </ul>
@@ -542,4 +582,5 @@ const compactFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 1,
 });
 
-export const compactNumber = (n: number) => `${compactFormatter.format(n)} views`;
+export const compactNumber = (n: number) =>
+  `${compactFormatter.format(n)} views`;

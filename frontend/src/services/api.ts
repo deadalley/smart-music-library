@@ -133,6 +133,11 @@ export const baseAPI = {
       `/playlists/${encodeURIComponent(playlistId)}/stats`,
     ),
 
+  getDecadeTracks: (decade: string, playlistId?: string) =>
+    api.get<Track[]>(`/decades/${encodeURIComponent(decade)}/tracks`, {
+      params: playlistId ? { playlist: playlistId } : undefined,
+    }),
+
   // Library search
   search: (query: string) =>
     api.get<LibrarySearchResult>("/search", { params: { q: query } }),
