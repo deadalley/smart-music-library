@@ -41,6 +41,9 @@ const TYPE_LABELS: Record<string, string> = Object.fromEntries(
 export function Statistics() {
   const { data: stats, isLoading, error } = useQuery({
     queryKey: ["library-stats"],
+    // Refresh while background release-year lookups are running.
+    refetchInterval: (query) =>
+      query.state.data?.releaseDates.lookupPending ? 15_000 : false,
     queryFn: async () => (await baseAPI.getLibraryStats()).data,
   });
 
@@ -110,7 +113,10 @@ export function Statistics() {
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           <OwnershipCard ownership={stats.ownership} />
           <TopArtistsCard artists={stats.topArtists} />
-          <DecadesCard decades={stats.decades} />
+          <DecadesCard
+            decades={stats.decades}
+            releaseDates={stats.releaseDates}
+          />
         </div>
 
         <h2 className="text-lg font-semibold mt-4">Organization</h2>

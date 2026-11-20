@@ -14,6 +14,7 @@ import {
   Playlist,
   PlaylistData,
   PlaylistType,
+  ReleaseDateSource,
   Track,
   TrackOwnership,
 } from "@smart-music-library/shared";
@@ -175,6 +176,7 @@ export class RedisService {
         "lastSyncedAt",
         "last-job",
         "sync-lock",
+        "release-lookup",
         "annotations:ownership",
         "annotations:playlist-types",
       ].map((k) => `${base}:${k}`),
@@ -590,6 +592,59 @@ export class RedisService {
     }
 
     await pipeline.exec();
+  }
+
+  /**
+   * Applies looked-up release dates to cached album hashes. Only touches
+   * albums that exist in this generation (a resync may have replaced it).
+   */
+  async updateAlbumReleaseDates(
+    updates: { albumId: string; releaseDate: string; source: ReleaseDateSource }[],
+  ): Promise<number> {
+    if (updates.length === 0) return 0;
+
+    const exists = redisClient.multi();
+    updates.forEach((u) => exists.exists(this.key("album", u.albumId)));
+    const present = (await exists.exec()) as unknown as number[];
+
+    const pipeline = redisClient.multi();
+    let applied = 0;
+    updates.forEach((u, i) => {
+      if (!present[i]) return;
+      pipeline.hSet(this.key("album", u.albumId), {
+        releaseDate: u.releaseDate,
+        releaseDateSource: u.source,
+      });
+      applied += 1;
+    });
+    if (applied > 0) await pipeline.exec();
+    return applied;
+  }
+
+  // Set while background release-date lookups are queued for this user.
+  private releaseLookupKey() {
+    return this.root("release-lookup");
+  }
+
+  /** Returns true if this call claimed the flag (no lookup was pending). */
+  async claimReleaseLookup(ttlSeconds: number): Promise<boolean> {
+    const ok = await redisClient.set(this.releaseLookupKey(), "1", {
+      NX: true,
+      EX: ttlSeconds,
+    });
+    return ok === "OK";
+  }
+
+  async refreshReleaseLookup(ttlSeconds: number): Promise<void> {
+    await redisClient.set(this.releaseLookupKey(), "1", { EX: ttlSeconds });
+  }
+
+  async clearReleaseLookup(): Promise<void> {
+    await redisClient.del(this.releaseLookupKey());
+  }
+
+  async isReleaseLookupPending(): Promise<boolean> {
+    return (await redisClient.exists(this.releaseLookupKey())) === 1;
   }
 
   // ---------------------------------------------------------------------

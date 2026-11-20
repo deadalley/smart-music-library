@@ -21,7 +21,11 @@ const TOP_OVERLAPS = 5;
 
 const share = (part: number, total: number) => (total > 0 ? part / total : 0);
 
+// Only real release dates count towards eras; an upload date says when a
+// video was posted, not when the music came out.
 function releaseYear(track: Track): number | undefined {
+  const source = track.album?.releaseDateSource;
+  if (source !== "youtube" && source !== "musicbrainz") return undefined;
   const year = parseInt(track.album?.releaseDate?.slice(0, 4) ?? "", 10);
   return Number.isFinite(year) && year > 1800 ? year : undefined;
 }
@@ -50,6 +54,12 @@ export function computeTrackStats(
   const artistCounts = new Map<string, { name: string; count: number }>();
   const decadeCounts = new Map<number, number>();
   let tracksWithYear = 0;
+  const releaseDates = {
+    fromYouTube: 0,
+    fromMusicBrainz: 0,
+    unknown: 0,
+    lookupPending: false,
+  };
 
   for (const track of tracks) {
     totalDurationMs += track.durationMs;
@@ -72,6 +82,11 @@ export function computeTrackStats(
       else
         artistCounts.set(id, { name: track.artistNames[i] ?? "", count: 1 });
     });
+
+    const source = track.album?.releaseDateSource;
+    if (source === "youtube") releaseDates.fromYouTube += 1;
+    else if (source === "musicbrainz") releaseDates.fromMusicBrainz += 1;
+    else releaseDates.unknown += 1;
 
     const year = releaseYear(track);
     if (year !== undefined) {
@@ -121,6 +136,7 @@ export function computeTrackStats(
     topArtists,
     ownership: { ...ownership, ownedShare: share(ownership.owned, trackCount) },
     decades,
+    releaseDates,
     mostViewed,
   };
 }
@@ -139,12 +155,14 @@ export class StatsService {
   }
 
   async getLibraryStats(): Promise<LibraryStats> {
-    const [tracks, allPlaylists, artistsById, meta] = await Promise.all([
-      this.library.getUserTracks(),
-      this.library.getUserPlaylists(),
-      this.loadArtistsById(),
-      this.library.getSyncMeta(),
-    ]);
+    const [tracks, allPlaylists, artistsById, meta, lookupPending] =
+      await Promise.all([
+        this.library.getUserTracks(),
+        this.library.getUserPlaylists(),
+        this.loadArtistsById(),
+        this.library.getSyncMeta(),
+        this.library.isReleaseLookupPending(),
+      ]);
 
     const playlists = allPlaylists.filter(
       (p) => p.id !== LIKED_SONGS_PLAYLIST_ID,
@@ -183,8 +201,11 @@ export class StatsService {
       typeCounts.set(type, (typeCounts.get(type) ?? 0) + 1);
     }
 
+    const trackStats = computeTrackStats(tracks, artistsById);
+    trackStats.releaseDates.lookupPending = lookupPending;
+
     return {
-      ...computeTrackStats(tracks, artistsById),
+      ...trackStats,
       playlistCount: playlists.length,
       artistCount: artistsById.size,
       likedCount: likedTracks.length,
@@ -214,11 +235,13 @@ export class StatsService {
     const playlist = await this.library.getPlaylist(playlistId);
     if (!playlist) return null;
 
-    const [tracks, artistsById, allPlaylists] = await Promise.all([
-      this.library.getPlaylistTracks(playlistId),
-      this.loadArtistsById(),
-      this.library.getUserPlaylists(),
-    ]);
+    const [tracks, artistsById, allPlaylists, lookupPending] =
+      await Promise.all([
+        this.library.getPlaylistTracks(playlistId),
+        this.loadArtistsById(),
+        this.library.getUserPlaylists(),
+        this.library.isReleaseLookupPending(),
+      ]);
     const memberships = await this.library.getTrackPlaylistMemberships(
       tracks.map((t) => t.id),
     );
@@ -250,8 +273,11 @@ export class StatsService {
       .sort((a, b) => b.sharedCount - a.sharedCount)
       .slice(0, TOP_OVERLAPS);
 
+    const trackStats = computeTrackStats(tracks, artistsById);
+    trackStats.releaseDates.lookupPending = lookupPending;
+
     return {
-      ...computeTrackStats(tracks, artistsById),
+      ...trackStats,
       likedCount,
       likedShare: share(likedCount, tracks.length),
       overlaps,

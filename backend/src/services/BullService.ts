@@ -1,10 +1,16 @@
 import { Job, JobType, Queue, Worker } from "bullmq";
 import { Redis as IORedis } from "ioredis";
 import {
+  EnrichReleaseDatesJobData,
+  enrichReleaseDatesJob,
+  LOOKUP_FLAG_TTL_SECONDS,
+} from "../jobs/enrichReleaseDates";
+import {
   getPersistJobStatusMessage,
   PersistJobData,
   persistUserDataJob,
 } from "../jobs/persistUserData";
+import { isMusicBrainzEnabled } from "./MusicBrainzService";
 import { redisClient } from "../redis";
 import { JobProgress, JobQueues, Jobs, JobStatus } from "../types";
 import { MusicSource, RedisService } from "./RedisService";
@@ -35,6 +41,9 @@ export interface BullServiceOptions {
   attempts?: number;
   backoffDelayMs?: number;
   processor?: (job: Job<PersistJobData>) => Promise<unknown>;
+  enrichProcessor?: (
+    job: Job<EnrichReleaseDatesJobData>,
+  ) => Promise<unknown>;
 }
 
 export class BullService {
@@ -42,6 +51,9 @@ export class BullService {
   private persistWorker?: Worker<PersistJobData>;
   private connection: IORedis;
   private workerConnection?: IORedis;
+  private enrichQueue: Queue<EnrichReleaseDatesJobData>;
+  private enrichWorker?: Worker<EnrichReleaseDatesJobData>;
+  private enrichWorkerConnection?: IORedis;
   private attempts: number;
   private backoffDelayMs: number;
 
@@ -49,7 +61,8 @@ export class BullService {
     startWorker = true,
     attempts = 3,
     backoffDelayMs = 5000,
-    processor = (job) => persistUserDataJob(job),
+    processor,
+    enrichProcessor,
   }: BullServiceOptions = {}) {
     this.connection = createBullConnection();
     this.attempts = attempts;
@@ -58,8 +71,44 @@ export class BullService {
     this.persistQueue = new Queue<PersistJobData>(JobQueues.PERSIST_USER_DATA, {
       connection: this.connection,
     });
+    this.enrichQueue = new Queue<EnrichReleaseDatesJobData>(
+      JobQueues.ENRICH_RELEASE_DATES,
+      { connection: this.connection },
+    );
+
+    processor ??= (job) =>
+      persistUserDataJob(job, undefined, {
+        onActivated: async (userId) => {
+          await this.startReleaseDateEnrichment(userId);
+        },
+      });
+    enrichProcessor ??= (job) =>
+      enrichReleaseDatesJob(job, {
+        enqueueNext: (data) => this.enqueueEnrichment(data),
+      });
 
     if (startWorker) {
+      // One lookup batch at a time across all users keeps us within
+      // MusicBrainz's rate limit.
+      this.enrichWorkerConnection = createBullConnection();
+      this.enrichWorker = new Worker<EnrichReleaseDatesJobData>(
+        JobQueues.ENRICH_RELEASE_DATES,
+        enrichProcessor,
+        { connection: this.enrichWorkerConnection, concurrency: 1 },
+      );
+      this.enrichWorker.on("completed", (job, result) => {
+        console.log(
+          `Release-date lookup for user ${job.data.userId}:`,
+          JSON.stringify(result),
+        );
+      });
+      this.enrichWorker.on("failed", (job, err) => {
+        console.error(
+          `Release-date lookup failed for user ${job?.data.userId}:`,
+          err?.message,
+        );
+      });
+
       this.workerConnection = createBullConnection();
       this.persistWorker = new Worker<PersistJobData>(
         JobQueues.PERSIST_USER_DATA,
@@ -178,7 +227,10 @@ export class BullService {
 
   async cleanup(): Promise<void> {
     await this.persistWorker?.close();
+    await this.enrichWorker?.close();
     await this.persistQueue.close();
+    await this.enrichQueue.close();
+    this.enrichWorkerConnection?.disconnect();
     this.workerConnection?.disconnect();
     this.connection.disconnect();
   }
@@ -226,5 +278,28 @@ export class BullService {
     } finally {
       if (locked) await redisClient.del(lockKey);
     }
+  }
+
+  /** Queues background MusicBrainz lookups unless already pending. */
+  async startReleaseDateEnrichment(
+    userId: string,
+    source: MusicSource = "yt-music",
+  ): Promise<boolean> {
+    if (!isMusicBrainzEnabled()) return false;
+    const library = new RedisService(userId, null, source);
+    if (!(await library.claimReleaseLookup(LOOKUP_FLAG_TTL_SECONDS))) {
+      return false;
+    }
+    await this.enqueueEnrichment({ userId, source });
+    return true;
+  }
+
+  private async enqueueEnrichment(data: EnrichReleaseDatesJobData) {
+    // No retries: a failed batch clears the pending flag, and the next sync
+    // picks up where the cache left off.
+    await this.enrichQueue.add(Jobs.ENRICH_RELEASE_DATES, data, {
+      removeOnComplete: { count: 100 },
+      removeOnFail: { count: 100 },
+    });
   }
 }

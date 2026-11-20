@@ -3,10 +3,11 @@ import {
   DecadeShare,
   OwnershipBreakdown,
   PlaylistRanking,
+  ReleaseDateCoverage,
   Track,
 } from "@smart-music-library/shared";
 import { LucideIcon } from "lucide-react";
-import { CSSProperties, ReactNode } from "react";
+import { ReactNode, useState } from "react";
 import { Link } from "react-router-dom";
 import { formatDuration } from "../../utils";
 
@@ -40,7 +41,7 @@ export function StatCard({
     <div
       className={`card bg-base-100 border border-base-200 shadow-sm ${className}`}
     >
-      <div className="card-body gap-4 p-5">
+      <div className="card-body gap-4 p-5 flex flex-col">
         <div className="flex items-center justify-between gap-2">
           <h2 className="card-title text-base">{title}</h2>
           {action}
@@ -95,51 +96,159 @@ export function StatTiles({ tiles }: { tiles: StatTile[] }) {
   );
 }
 
+type OwnershipKey = "owned" | "wishlist" | "notOwned";
+
+const OWNERSHIP_SEGMENTS: {
+  key: OwnershipKey;
+  label: string;
+  color: string;
+}[] = [
+  { key: "owned", label: "Owned", color: "var(--color-chart-owned)" },
+  { key: "wishlist", label: "Wishlist", color: "var(--color-chart-wishlist)" },
+  // Neutral remainder ring: identified by the legend label, not by hue.
+  {
+    key: "notOwned",
+    label: "Not owned",
+    color: "color-mix(in oklab, var(--color-base-content) 18%, transparent)",
+  },
+];
+
+const DONUT_RADIUS = 40;
+const DONUT_STROKE = 14;
+const DONUT_CIRCUMFERENCE = 2 * Math.PI * DONUT_RADIUS;
+// Gap between segments, in viewBox units (≈2px at typical sizes).
+const DONUT_GAP = 1.2;
+
 export function OwnershipCard({
   ownership,
 }: {
   ownership: OwnershipBreakdown;
 }) {
-  const percent = Math.round(ownership.ownedShare * 100);
+  const [active, setActive] = useState<OwnershipKey | null>(null);
+  const total = ownership.owned + ownership.wishlist + ownership.notOwned;
+
+  const segments = OWNERSHIP_SEGMENTS.map((segment) => ({
+    ...segment,
+    count: ownership[segment.key],
+    share: total > 0 ? ownership[segment.key] / total : 0,
+  }));
+  const visible = segments.filter((s) => s.count > 0);
+  const gap = visible.length > 1 ? DONUT_GAP : 0;
+
+  let offset = 0;
+  const arcs = visible.map((segment) => {
+    const length = segment.share * DONUT_CIRCUMFERENCE;
+    const arc = {
+      ...segment,
+      dash: Math.max(0, length - gap),
+      offset,
+    };
+    offset += length;
+    return arc;
+  });
+
+  const focused = segments.find((s) => s.key === active);
+  const centre = focused ?? {
+    label: "owned",
+    share: ownership.ownedShare,
+    count: ownership.owned,
+  };
+
   return (
-    <StatCard title="Collection">
-      <div className="flex items-center gap-6">
-        <div
-          className="radial-progress text-primary bg-base-200 shrink-0"
-          style={
-            {
-              "--value": percent,
-              "--size": "6.5rem",
-              "--thickness": "0.6rem",
-            } as CSSProperties
-          }
-          role="progressbar"
-          aria-valuenow={percent}
-          aria-label="Share of tracks owned"
-        >
-          <span className="text-xl font-bold text-base-content">
-            {percent}%
-          </span>
-        </div>
-        <div className="flex flex-col gap-2 text-sm">
-          <span className="text-base-content/60">of tracks owned</span>
-          <div className="flex flex-wrap gap-2">
-            <span className="badge badge-success badge-soft">
-              {formatCount(ownership.owned)} owned
-            </span>
-            <span className="badge badge-warning badge-soft">
-              {formatCount(ownership.wishlist)} wishlist
-            </span>
-            <span className="badge badge-ghost">
-              {formatCount(ownership.notOwned)} not owned
-            </span>
+    <StatCard title="Collection" className="h-full">
+      <div className="flex flex-1 flex-col gap-5">
+        <div className="flex flex-1 items-center justify-center">
+          <div className="relative w-full max-w-72 aspect-square">
+            <svg
+              viewBox="0 0 100 100"
+              className="size-full -rotate-90"
+              role="img"
+              aria-label={`${formatCount(ownership.owned)} owned, ${formatCount(
+                ownership.wishlist,
+              )} on wishlist, ${formatCount(ownership.notOwned)} not owned`}
+            >
+              {/* Track, so an empty or tiny share still reads as a ring */}
+              <circle
+                cx="50"
+                cy="50"
+                r={DONUT_RADIUS}
+                fill="none"
+                stroke="var(--color-base-200)"
+                strokeWidth={DONUT_STROKE}
+              />
+              {arcs.map((arc) => (
+                <circle
+                  key={arc.key}
+                  cx="50"
+                  cy="50"
+                  r={DONUT_RADIUS}
+                  fill="none"
+                  stroke={arc.color}
+                  strokeWidth={
+                    active === arc.key ? DONUT_STROKE + 3 : DONUT_STROKE
+                  }
+                  strokeDasharray={`${arc.dash} ${DONUT_CIRCUMFERENCE}`}
+                  strokeDashoffset={-arc.offset}
+                  className="cursor-default transition-[stroke-width,opacity] duration-150"
+                  opacity={active && active !== arc.key ? 0.45 : 1}
+                  onMouseEnter={() => setActive(arc.key)}
+                  onMouseLeave={() => setActive(null)}
+                >
+                  <title>{`${arc.label}: ${formatCount(arc.count)} (${formatPercent(arc.share)})`}</title>
+                </circle>
+              ))}
+            </svg>
+            <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
+              <span className="text-4xl font-bold tabular-nums leading-none">
+                {formatPercent(centre.share)}
+              </span>
+              <span className="mt-1 text-sm text-base-content/60 lowercase">
+                {centre.label}
+              </span>
+              <span className="text-xs text-base-content/50 tabular-nums">
+                {formatCount(centre.count)} of {formatCount(total)}
+              </span>
+            </div>
           </div>
-          {ownership.wishlist > 0 && (
-            <Link to="/wishlist" className="link link-primary text-xs">
-              View wishlist
-            </Link>
-          )}
         </div>
+
+        <ul className="grid grid-cols-3 gap-2 text-sm">
+          {segments.map((segment) => (
+            <li key={segment.key}>
+              <button
+                type="button"
+                className={`w-full rounded-box px-2 py-1.5 text-left transition-colors ${
+                  active === segment.key ? "bg-base-200" : "hover:bg-base-200/60"
+                }`}
+                onMouseEnter={() => setActive(segment.key)}
+                onMouseLeave={() => setActive(null)}
+                onFocus={() => setActive(segment.key)}
+                onBlur={() => setActive(null)}
+              >
+                <span className="flex items-baseline gap-1.5 text-base-content/70 leading-tight">
+                  <span
+                    className="size-2.5 shrink-0 translate-y-px rounded-full"
+                    style={{ background: segment.color }}
+                    aria-hidden
+                  />
+                  <span>{segment.label}</span>
+                </span>
+                <span className="block font-semibold tabular-nums">
+                  {formatCount(segment.count)}
+                  <span className="ml-1 font-normal text-base-content/50">
+                    {formatPercent(segment.share)}
+                  </span>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+
+        {ownership.wishlist > 0 && (
+          <Link to="/wishlist" className="link link-primary text-xs -mt-2">
+            View wishlist
+          </Link>
+        )}
       </div>
     </StatCard>
   );
@@ -212,22 +321,35 @@ export function TopArtistsCard({
   );
 }
 
-export function DecadesCard({ decades }: { decades: DecadeShare[] }) {
+export function DecadesCard({
+  decades,
+  releaseDates,
+}: {
+  decades: DecadeShare[];
+  releaseDates: ReleaseDateCoverage;
+}) {
   const max = Math.max(0, ...decades.map((d) => d.share));
+  const known = releaseDates.fromYouTube + releaseDates.fromMusicBrainz;
+  const total = known + releaseDates.unknown;
+
   return (
     <StatCard
       title="Eras"
       action={
-        <span
-          className="badge badge-ghost badge-sm tooltip tooltip-left"
-          data-tip="YouTube only exposes when a video was uploaded, not the original release year."
-        >
-          by upload year
-        </span>
+        releaseDates.lookupPending ? (
+          <span className="badge badge-ghost badge-sm gap-1">
+            <span className="loading loading-spinner loading-xs" />
+            looking up
+          </span>
+        ) : undefined
       }
     >
       {decades.length === 0 ? (
-        <p className="text-sm text-base-content/60">No dates available.</p>
+        <p className="text-sm text-base-content/60">
+          {releaseDates.lookupPending
+            ? "Looking up release years…"
+            : "No release years known yet."}
+        </p>
       ) : (
         <ul className="flex flex-col gap-3">
           {decades.map(({ decade, count, share }) => (
@@ -240,6 +362,20 @@ export function DecadesCard({ decades }: { decades: DecadeShare[] }) {
             />
           ))}
         </ul>
+      )}
+      {total > 0 && (
+        <p
+          className="mt-auto text-xs text-base-content/60 tooltip tooltip-top text-left"
+          data-tip={`${formatCount(releaseDates.fromYouTube)} from YouTube Music, ${formatCount(
+            releaseDates.fromMusicBrainz,
+          )} from MusicBrainz. Tracks with only an upload date are left out.`}
+        >
+          Release year known for {formatCount(known)} of {formatCount(total)}{" "}
+          tracks ({formatPercent(known / total)})
+          {releaseDates.lookupPending && releaseDates.unknown > 0
+            ? ` · looking up ${formatCount(releaseDates.unknown)}…`
+            : ""}
+        </p>
       )}
     </StatCard>
   );

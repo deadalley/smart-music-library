@@ -26,6 +26,7 @@ const album: Album = {
   name: "Artist",
   type: "youtube",
   releaseDate: "2020-05-01",
+  releaseDateSource: "youtube",
   images: [{ url: "https://img/1.jpg", width: 10, height: 10 }],
   externalUrls: { spotify: "https://youtube.com/channel/ch1" },
 };
@@ -137,6 +138,16 @@ describe("playlist / artist / album conversion", () => {
 
   it("round-trips an album", () => {
     expect(convertFromRedisAlbum(convertToRedisAlbum(album))).toEqual(album);
+  });
+
+  it("treats legacy album dates (no source) as upload dates", () => {
+    const { releaseDateSource: _omit, ...legacy } = album;
+    void _omit;
+    const stored = convertToRedisAlbum(legacy);
+    expect(convertFromRedisAlbum(stored).releaseDateSource).toBe("upload");
+    expect(
+      convertFromRedisAlbum({ ...stored, releaseDate: "" }).releaseDateSource,
+    ).toBeUndefined();
   });
 });
 

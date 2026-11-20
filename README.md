@@ -142,6 +142,17 @@ separately and survive resyncs.
 
 - `GET /api/search?q=` - Search across the cached library
 
+### Statistics
+
+- `GET /api/stats` - Library statistics
+- `GET /api/playlists/:id/stats` - Statistics for one playlist
+
+Release years come from the YouTube Music track description ("Released on" /
+℗) when available. Other tracks (music videos, fan uploads) are looked up on
+MusicBrainz in the background after a sync, at most one request per second,
+and cached for every user. Set `MUSICBRAINZ_CONTACT` to identify your
+deployment to MusicBrainz, or `MUSICBRAINZ_ENABLED=false` to turn lookups off.
+
 ### Health
 
 - `GET /api/health` - Liveness check (pings Redis)

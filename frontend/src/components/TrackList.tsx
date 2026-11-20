@@ -241,10 +241,32 @@ export function TrackList({
       meta: { span: 1, width: "3.5rem", align: "center" },
       enableSorting: true,
       cell: ({ row }) => {
-        const year = row.original.track.album.releaseDate?.substring(0, 4);
+        const { releaseDate, releaseDateSource } = row.original.track.album;
+        const year = releaseDate?.substring(0, 4);
+        if (!year) {
+          return <span className="text-base-content/30 text-sm">—</span>;
+        }
+        // Only the upload date is known: show it, but de-emphasised.
+        if (releaseDateSource === "upload") {
+          return (
+            <span
+              className="text-base-content/30 text-sm tabular-nums italic"
+              title="Upload year — the original release year isn't known"
+            >
+              {year}
+            </span>
+          );
+        }
         return (
-          <span className="text-base-content/50 text-sm tabular-nums">
-            {year || "—"}
+          <span
+            className="text-base-content/50 text-sm tabular-nums"
+            title={
+              releaseDateSource === "musicbrainz"
+                ? "Release year from MusicBrainz"
+                : "Release year"
+            }
+          >
+            {year}
           </span>
         );
       },

@@ -72,11 +72,16 @@ export interface Artist {
   genres: string[];
 }
 
+// Where an album's releaseDate came from: the YouTube Music description
+// ("Released on" / ℗), a MusicBrainz lookup, or just the video upload date.
+export type ReleaseDateSource = "youtube" | "musicbrainz" | "upload";
+
 export interface Album {
   id: string;
   name: string;
   type: string;
   releaseDate?: string;
+  releaseDateSource?: ReleaseDateSource;
   totalTracks?: number;
   images?: Image[];
   externalUrls?: ExternalUrls;
@@ -200,7 +205,8 @@ export interface TrackStats {
   uniqueArtistCount: number;
   topArtists: ArtistShare[];
   ownership: OwnershipBreakdown;
-  decades: DecadeShare[];
+  decades: DecadeShare[]; // real release dates only
+  releaseDates: ReleaseDateCoverage;
   mostViewed: Track[];
 }
 
@@ -208,6 +214,13 @@ export interface PlaylistRanking {
   playlist: Playlist;
   trackCount: number;
   totalDurationMs: number;
+}
+
+export interface ReleaseDateCoverage {
+  fromYouTube: number;
+  fromMusicBrainz: number;
+  unknown: number; // only the upload date is known
+  lookupPending: boolean;
 }
 
 export interface LibraryStats extends TrackStats {

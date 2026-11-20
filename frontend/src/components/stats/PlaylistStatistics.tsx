@@ -17,6 +17,8 @@ import {
 export function PlaylistStatistics({ playlistId }: { playlistId: string }) {
   const { data: stats, isLoading, error } = useQuery({
     queryKey: ["playlist-stats", playlistId],
+    refetchInterval: (query) =>
+      query.state.data?.releaseDates.lookupPending ? 15_000 : false,
     queryFn: async () => (await baseAPI.getPlaylistStats(playlistId)).data,
   });
 
@@ -68,7 +70,10 @@ export function PlaylistStatistics({ playlistId }: { playlistId: string }) {
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               <OwnershipCard ownership={stats.ownership} />
               <TopArtistsCard artists={stats.topArtists} limit={5} />
-              <DecadesCard decades={stats.decades} />
+              <DecadesCard
+                decades={stats.decades}
+                releaseDates={stats.releaseDates}
+              />
               <PlaylistTableCard
                 title="Overlaps with"
                 valueHeader="Shared"

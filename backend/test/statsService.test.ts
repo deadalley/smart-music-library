@@ -15,7 +15,13 @@ import { fakeYouTube, FakeLibrary, video } from "./youtubeFakes";
 
 const withYear = (id: string, year: number, extra = {}) =>
   makeTrack(id, {
-    album: { id: `al-${id}`, name: "", type: "album", releaseDate: `${year}-01-01` },
+    album: {
+      id: `al-${id}`,
+      name: "",
+      type: "album",
+      releaseDate: `${year}-01-01`,
+      releaseDateSource: "youtube",
+    },
     ...extra,
   });
 
@@ -45,7 +51,11 @@ describe("computeTrackStats", () => {
         artistIds: ["a2"],
         artistNames: ["Artist Two"],
       }),
-      makeTrack("t4", { durationMs: 0, album: { id: "x", name: "", type: "youtube" } }),
+      makeTrack("t4", {
+        durationMs: 0,
+        // upload date only: excluded from decades
+        album: { id: "x", name: "", type: "youtube", releaseDate: "2016-01-01", releaseDateSource: "upload" },
+      }),
       // duplicate id is ignored
       withYear("t1", 1994, { durationMs: 100_000 }),
     ];
@@ -67,6 +77,12 @@ describe("computeTrackStats", () => {
     ]);
     expect(stats.topArtists[0].share).toBe(0.75);
     expect(stats.mostViewed.map((t) => t.id)).toEqual(["t2", "t1"]);
+    expect(stats.releaseDates).toEqual({
+      fromYouTube: 3,
+      fromMusicBrainz: 0,
+      unknown: 1,
+      lookupPending: false,
+    });
   });
 });
 
