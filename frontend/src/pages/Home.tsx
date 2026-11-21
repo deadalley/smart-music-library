@@ -1,7 +1,7 @@
 import { useSearchParams } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { YouTubeLogo } from "../components/YouTubeLogo";
-import { SmartSpotifyLogo } from "../components/SmartSpotifyLogo";
+import { AppLogo } from "../components/AppLogo";
 
 const YOUTUBE_LOGIN_ERROR_MESSAGES: Record<string, string> = {
   youtube_not_configured: "YouTube login isn't configured on the server.",
@@ -20,7 +20,7 @@ export function Home() {
   return (
     <div className="w-screen h-screen flex flex-col justify-center items-center">
       <div className="flex flex-col gap-5 items-center max-w-lg w-full px-6">
-        <SmartSpotifyLogo className="max-w-14 h-auto text-primary" />
+        <AppLogo className="size-20 text-primary" title="Smart Music" />
         <h1 className="text-4xl font-bold text-center">Smart Music</h1>
 
         {error && (

@@ -11,7 +11,7 @@ import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { getAppName } from "../utils";
 import { SearchDialog } from "./SearchDialog";
-import { SmartSpotifyLogo } from "./SmartSpotifyLogo";
+import { AppLogo } from "./AppLogo";
 import { SyncModal } from "./SyncModal";
 
 export function Navbar() {
@@ -43,7 +43,7 @@ export function Navbar() {
             to="/"
             className="flex font-bold text-lg gap-2 items-center text-base-content hover:text-primary transition-colors group"
           >
-            <SmartSpotifyLogo className="size-6 group-hover:scale-110 transition-transform text-primary" />
+            <AppLogo className="size-7 group-hover:scale-110 transition-transform text-primary" />
             <span className="hidden md:inline">{appName}</span>
           </Link>
 
