@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="86 72 360 350" width="360" height="350">
+  <!-- Monochrome app mark (record + analytics bars, no tile), derived from
+       favicon.svg. Black = visible; used as a CSS mask so the app can colour
+       it with currentColor. Grooves, label and the gaps around the bars are
+       cut out of the record with SVG masks. -->
+  <defs>
+    <mask id="record" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <circle cx="253" cy="239" r="160" fill="#fff"/>
+      <g fill="none" stroke="#000" stroke-width="15" stroke-linecap="round">
+        <path d="M120 244 A133 133 0 0 1 245 119"/>
+        <path d="M157 242 A96 96 0 0 1 253 146"/>
+      </g>
+      <circle cx="253" cy="239" r="57" fill="#000"/>
+      <circle cx="253" cy="239" r="12" fill="#fff"/>
+      <g fill="#000" stroke="#000" stroke-width="13" stroke-linejoin="round">
+        <rect x="224" y="331" width="58" height="83" rx="18"/>
+        <rect x="276" y="306" width="58" height="108" rx="18"/>
+        <rect x="328" y="263" width="58" height="151" rx="18"/>
+        <rect x="380" y="220" width="58" height="194" rx="18"/>
+      </g>
+    </mask>
+    <!-- Bars in paint order: each later bar's outline cuts into the previous one -->
+    <mask id="bars" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <g fill="#fff" stroke="#000" stroke-width="13" stroke-linejoin="round">
+        <rect x="224" y="331" width="58" height="83" rx="18"/>
+        <rect x="276" y="306" width="58" height="108" rx="18"/>
+        <rect x="328" y="263" width="58" height="151" rx="18"/>
+        <rect x="380" y="220" width="58" height="194" rx="18"/>
+      </g>
+    </mask>
+  </defs>
+  <circle cx="253" cy="239" r="160" fill="#000" mask="url(#record)"/>
+  <rect x="210" y="205" width="240" height="225" fill="#000" mask="url(#bars)"/>
+</svg>

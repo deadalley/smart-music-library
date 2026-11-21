@@ -1,17 +1,26 @@
 <!doctype html>
-<html lang="en" data-theme="spotify">
+<html lang="en" data-theme="smart-dark">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta
+      name="theme-color"
+      content="#00594e"
+      media="(prefers-color-scheme: light)"
+    />
+    <meta
+      name="theme-color"
+      content="#030706"
+      media="(prefers-color-scheme: dark)"
+    />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Smart Music Library</title>
     <script>
+      // Apply the saved light/dark choice before first paint, so the page
+      // doesn't flash the wrong theme. Must match ThemeContext.
       (function () {
         try {
-          var source =
-            localStorage.getItem("smart_spotify_auth_source") === "youtube"
-              ? "youtube"
-              : "spotify";
           var mode = localStorage.getItem("smart_spotify_color_mode");
           var isDark =
             mode === "dark" ||
@@ -19,7 +28,7 @@
               window.matchMedia("(prefers-color-scheme: dark)").matches);
           document.documentElement.setAttribute(
             "data-theme",
-            isDark ? source : source + "-light",
+            isDark ? "smart-dark" : "smart-light",
           );
         } catch (e) {}
       })();

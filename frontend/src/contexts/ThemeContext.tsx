@@ -46,7 +46,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     document.documentElement.setAttribute(
       "data-theme",
-      isDark ? "youtube" : "youtube-light",
+      isDark ? "smart-dark" : "smart-light",
     );
   }, [isDark]);
 
