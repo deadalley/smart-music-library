@@ -103,12 +103,13 @@ export function resolveReleaseDate(
   }
   if (cached) return { releaseDate: cached, releaseDateSource: "musicbrainz" };
   const upload = v.publishedAt?.slice(0, 10);
-  return upload
-    ? { releaseDate: upload, releaseDateSource: "upload" }
-    : {};
+  return upload ? { releaseDate: upload, releaseDateSource: "upload" } : {};
 }
 
-export function videoToTrack(v: YouTubeVideo, cachedReleaseDate?: string | null): Track {
+export function videoToTrack(
+  v: YouTubeVideo,
+  cachedReleaseDate?: string | null,
+): Track {
   const artistName = v.channelTitle.replace(/ - Topic$/, "");
   return {
     id: v.id,
@@ -331,9 +332,7 @@ export async function syncYouTubeLibrary({
   return result;
 }
 
-export type YouTubeServiceFactory = (
-  data: PersistJobData,
-) => YouTubeService;
+export type YouTubeServiceFactory = (data: PersistJobData) => YouTubeService;
 
 const defaultYouTubeFactory: YouTubeServiceFactory = (data) =>
   // The OAuth2 client refreshes the access token on its own (on expiry or
@@ -366,12 +365,15 @@ export async function persistUserDataJob(
   try {
     await job.updateProgress(JobProgressPercentage.START);
 
-    const result = await syncYouTubeLibrary({
-      userId,
-      yt: createYouTubeService(job.data),
-      store,
-      reportProgress: (progress) => job.updateProgress(progress),
-    });
+    // Build the whole library in memory and write it once.
+    const result = await store.batch(() =>
+      syncYouTubeLibrary({
+        userId,
+        yt: createYouTubeService(job.data),
+        store,
+        reportProgress: (progress) => job.updateProgress(progress),
+      }),
+    );
 
     await RedisService.activateGeneration(userId, generation, source);
     await job.updateProgress(JobProgressPercentage.COMPLETED);

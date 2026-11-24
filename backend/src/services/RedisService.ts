@@ -1,14 +1,5 @@
 import {
-  Album,
   Artist,
-  convertFromRedisAlbum,
-  convertFromRedisArtist,
-  convertFromRedisPlaylist,
-  convertFromRedisTrack,
-  convertToRedisAlbum,
-  convertToRedisArtist,
-  convertToRedisPlaylist,
-  convertToRedisTrack,
   isPlaylistType,
   isTrackOwnership,
   Playlist,
@@ -18,6 +9,9 @@ import {
   Track,
   TrackOwnership,
 } from "@smart-music-library/shared";
+import { randomUUID } from "crypto";
+import { commandOptions } from "redis";
+import { gunzipSync, gzipSync } from "zlib";
 import { redisClient } from "../redis";
 
 export type MusicSource = "yt-music";
@@ -36,13 +30,19 @@ export const LIBRARY_TTL_SECONDS = 30 * 24 * 60 * 60;
 export const ANNOTATIONS_TTL_SECONDS = 365 * 24 * 60 * 60;
 
 const DELETE_BATCH_SIZE = 500;
-const WRITE_CHUNK_SIZE = 200;
+
+// Upstash (and other managed Redis) cap request size; stay well below 1 MB.
+export const SNAPSHOT_CHUNK_BYTES = 900 * 1024;
+// Parsed snapshots kept in memory (a few users' libraries).
+const SNAPSHOT_CACHE_SIZE = 4;
 
 export const LIKED_SONGS_PLAYLIST_ID = "liked-songs";
 
 export interface SyncMeta {
   /** True when written by a sync that records release-date sources. */
   hasReleaseDates?: boolean;
+  /** True when the library is stored as a snapshot (current format). */
+  hasSnapshot?: boolean;
   lastSync: string;
   playlistCount: number;
   trackCount: number;
@@ -53,9 +53,79 @@ export interface SyncMeta {
 type RedisHash = Record<string, string>;
 
 function isNonEmptyHash(value: unknown): value is RedisHash {
-  return (
-    !!value && typeof value === "object" && Object.keys(value).length > 0
-  );
+  return !!value && typeof value === "object" && Object.keys(value).length > 0;
+}
+
+/**
+ * A whole synced library, stored as one gzip-compressed JSON document per
+ * generation. Annotations (ownership, playlist types) are not part of it;
+ * they're overlaid at read time. Counts and relations are derived.
+ */
+interface LibrarySnapshot {
+  v: 1;
+  playlists: Record<string, Playlist>;
+  /** Ordered track ids per playlist (also for playlists not in `playlists`). */
+  playlistTrackIds: Record<string, string[]>;
+  tracks: Record<string, Track>;
+  artists: Record<string, Artist>;
+}
+
+interface LoadedSnapshot {
+  rev: string | null;
+  data: LibrarySnapshot;
+  /** trackId -> playlist ids containing it (derived) */
+  trackPlaylists: Map<string, string[]>;
+  /** artistId -> track ids credited to it (derived) */
+  artistTracks: Map<string, string[]>;
+}
+
+const emptySnapshot = (): LibrarySnapshot => ({
+  v: 1,
+  playlists: {},
+  playlistTrackIds: {},
+  tracks: {},
+  artists: {},
+});
+
+function index(data: LibrarySnapshot, rev: string | null): LoadedSnapshot {
+  const trackPlaylists = new Map<string, string[]>();
+  for (const [playlistId, ids] of Object.entries(data.playlistTrackIds)) {
+    for (const id of ids) {
+      const list = trackPlaylists.get(id);
+      if (list) list.push(playlistId);
+      else trackPlaylists.set(id, [playlistId]);
+    }
+  }
+  const artistTracks = new Map<string, string[]>();
+  for (const track of Object.values(data.tracks)) {
+    for (const artistId of track.artistIds) {
+      const list = artistTracks.get(artistId);
+      if (list) list.push(track.id);
+      else artistTracks.set(artistId, [track.id]);
+    }
+  }
+  return { rev, data, trackPlaylists, artistTracks };
+}
+
+// Small LRU of parsed snapshots, validated against the stored revision on
+// every read (one tiny GET), so it's safe across processes and resets.
+const snapshotCache = new Map<string, LoadedSnapshot>();
+
+function cacheGet(key: string): LoadedSnapshot | undefined {
+  const hit = snapshotCache.get(key);
+  if (hit) {
+    snapshotCache.delete(key);
+    snapshotCache.set(key, hit);
+  }
+  return hit;
+}
+
+function cacheSet(key: string, value: LoadedSnapshot) {
+  snapshotCache.delete(key);
+  snapshotCache.set(key, value);
+  while (snapshotCache.size > SNAPSHOT_CACHE_SIZE) {
+    snapshotCache.delete(snapshotCache.keys().next().value!);
+  }
 }
 
 /**
@@ -69,14 +139,20 @@ function isNonEmptyHash(value: unknown): value is RedisHash {
  *   smart-spotify:{uid}:{source}:annotations:playlist-types  (hash playlistId -> type)
  *   smart-spotify:{uid}:{source}:last-job / sync-lock        (job bookkeeping)
  *
- *   smart-spotify:{uid}:{source}:g:{gen}:{type}:...    -> synced library data
+ *   smart-spotify:{uid}:{source}:g:{gen}:meta         -> sync stats (hash)
+ *   smart-spotify:{uid}:{source}:g:{gen}:snapshot     -> "{rev}:{chunks}" header
+ *   smart-spotify:{uid}:{source}:g:{gen}:snapshot:N   -> gzip JSON chunk(s)
+ *
+ * The library itself is one compressed snapshot per generation rather than
+ * thousands of per-track/per-artist keys: a page view then costs a handful
+ * of Redis commands instead of tens of thousands, which matters on
+ * command-metered plans (e.g. Upstash's free tier).
  *
  * A sync writes a brand-new generation and only flips `current-gen` once it
  * has fully succeeded, so readers never see a half-built (or, after a
- * failure, empty) library. Users who synced before generations existed have
- * no `current-gen`; their data lives directly under
- * `smart-spotify:{uid}:{source}:{type}:...` (the "legacy" namespace) and
- * stays readable until their next sync migrates it.
+ * failure, empty) library. Libraries stored in older formats (per-entity
+ * keys, with or without generations) have no snapshot: they read as empty
+ * and the app asks for a resync, which cleans them up.
  */
 export class RedisService {
   constructor(
@@ -111,18 +187,12 @@ export class RedisService {
     return [base, type, ...parts].join(":");
   }
 
-  // Explicit indexes of known IDs (rather than discovering them via SCAN +
-  // glob match) so enumeration can't silently miss entries.
-  private playlistIndexKey() {
-    return this.key("playlists-index");
+  private snapshotKey(...parts: string[]) {
+    return this.key("snapshot", ...parts);
   }
 
-  private artistIndexKey() {
-    return this.key("artists-index");
-  }
-
-  private trackIndexKey() {
-    return this.key("tracks-index");
+  private cacheKey() {
+    return this.key("snapshot");
   }
 
   private ownershipKey() {
@@ -228,9 +298,10 @@ export class RedisService {
   }
 
   private async migrateLegacyAnnotations(): Promise<void> {
+    // Pre-generation per-entity layout (indexes + hashes under the root).
     const [trackIds, playlistIds] = await Promise.all([
-      redisClient.sMembers(this.trackIndexKey()),
-      redisClient.sMembers(this.playlistIndexKey()),
+      redisClient.sMembers(this.key("tracks-index")),
+      redisClient.sMembers(this.key("playlists-index")),
     ]);
     if (trackIds.length === 0 && playlistIds.length === 0) return;
 
@@ -279,6 +350,7 @@ export class RedisService {
         artistCount: String(meta.artistCount),
         skippedPlaylists: String(meta.skippedPlaylists),
         releaseDates: "1",
+        storage: "snapshot",
       })
       .expire(metaKey, LIBRARY_TTL_SECONDS)
       // Kept without a TTL so we can tell "never synced" apart from
@@ -302,6 +374,7 @@ export class RedisService {
       artistCount: Number(data.artistCount || 0),
       skippedPlaylists: Number(data.skippedPlaylists || 0),
       hasReleaseDates: data.releaseDates === "1",
+      hasSnapshot: data.storage === "snapshot",
     };
   }
 
@@ -318,6 +391,7 @@ export class RedisService {
       .hSet(this.playlistTypesKey(), playlistId, playlistType)
       .expire(this.playlistTypesKey(), ANNOTATIONS_TTL_SECONDS)
       .exec();
+    this.playlistTypesMemo = undefined;
   }
 
   async updateTrackOwnership(
@@ -333,14 +407,17 @@ export class RedisService {
     }
     pipeline.expire(key, ANNOTATIONS_TTL_SECONDS);
     await pipeline.exec();
+    this.ownershipMemo = undefined;
   }
 
-  private async getOwnershipMap(): Promise<RedisHash> {
-    return redisClient.hGetAll(this.ownershipKey());
+  private getOwnershipMap(): Promise<RedisHash> {
+    this.ownershipMemo ??= redisClient.hGetAll(this.ownershipKey());
+    return this.ownershipMemo;
   }
 
-  private async getPlaylistTypeMap(): Promise<RedisHash> {
-    return redisClient.hGetAll(this.playlistTypesKey());
+  private getPlaylistTypeMap(): Promise<RedisHash> {
+    this.playlistTypesMemo ??= redisClient.hGetAll(this.playlistTypesKey());
+    return this.playlistTypesMemo;
   }
 
   private applyOwnership(track: Track, ownership: RedisHash): Track {
@@ -356,273 +433,196 @@ export class RedisService {
   }
 
   // ---------------------------------------------------------------------
+  // Snapshot storage
+  // ---------------------------------------------------------------------
+
+  // Set while a batch() is running: writes then mutate this in memory and
+  // are saved once when the batch ends.
+  private pending: LoadedSnapshot | null = null;
+
+  // Request-scoped memos: a RedisService is created per request (forUser),
+  // and one page view can read the library dozens of times (e.g. stats over
+  // every playlist). Load the snapshot and annotations once per instance.
+  private loaded?: Promise<LoadedSnapshot>;
+  private ownershipMemo?: Promise<RedisHash>;
+  private playlistTypesMemo?: Promise<RedisHash>;
+
+  /**
+   * Loads the library snapshot: one GET for the "{rev}:{chunks}" header,
+   * plus one MGET for the chunks only when the cached copy is stale.
+   */
+  private load(): Promise<LoadedSnapshot> {
+    if (this.pending) return Promise.resolve(this.pending);
+    this.loaded ??= this.loadFromRedis().catch((err) => {
+      this.loaded = undefined;
+      throw err;
+    });
+    return this.loaded;
+  }
+
+  private async loadFromRedis(): Promise<LoadedSnapshot> {
+    const header = await redisClient.get(this.snapshotKey());
+    if (!header) return index(emptySnapshot(), null);
+
+    const [rev, countText] = header.split(":");
+    const cached = cacheGet(this.cacheKey());
+    if (cached && cached.rev === rev) return cached;
+
+    const count = Number(countText) || 0;
+    const chunks = await redisClient.mGet(
+      commandOptions({ returnBuffers: true }),
+      Array.from({ length: count }, (_, i) => this.snapshotKey(String(i))),
+    );
+    if (chunks.some((c) => !c)) {
+      // Header without data (e.g. expired mid-way): treat as no library.
+      return index(emptySnapshot(), null);
+    }
+
+    const json = gunzipSync(Buffer.concat(chunks as Buffer[])).toString("utf8");
+    const loaded = index(JSON.parse(json) as LibrarySnapshot, rev);
+    cacheSet(this.cacheKey(), loaded);
+    return loaded;
+  }
+
+  /** Writes the snapshot (chunked) and a new header in one MULTI. */
+  private async save(data: LibrarySnapshot): Promise<void> {
+    const compressed = gzipSync(JSON.stringify(data));
+    const chunks: Buffer[] = [];
+    for (let i = 0; i < compressed.length; i += SNAPSHOT_CHUNK_BYTES) {
+      chunks.push(compressed.subarray(i, i + SNAPSHOT_CHUNK_BYTES));
+    }
+    if (chunks.length === 0) chunks.push(Buffer.alloc(0));
+
+    const rev = randomUUID();
+    const pipeline = redisClient.multi();
+    chunks.forEach((chunk, i) =>
+      pipeline.set(this.snapshotKey(String(i)), chunk, {
+        EX: LIBRARY_TTL_SECONDS,
+      }),
+    );
+    pipeline.set(this.snapshotKey(), `${rev}:${chunks.length}`, {
+      EX: LIBRARY_TTL_SECONDS,
+    });
+    await pipeline.exec();
+
+    const loaded = index(data, rev);
+    cacheSet(this.cacheKey(), loaded);
+    this.loaded = Promise.resolve(loaded);
+  }
+
+  /** Load → mutate → save, or just mutate inside a batch(). */
+  private async mutate(fn: (data: LibrarySnapshot) => void): Promise<void> {
+    if (this.pending) {
+      fn(this.pending.data);
+      return;
+    }
+    const current = await this.load();
+    // Work on a copy so a failed write can't leave the cache half-mutated.
+    const next = structuredClone(current.data);
+    fn(next);
+    await this.save(next);
+  }
+
+  /**
+   * Runs `fn` with all library writes buffered in memory, then saves the
+   * snapshot once. Used by the sync job, which writes many times.
+   */
+  async batch<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.pending) return fn();
+    const current = await this.load();
+    this.pending = index(structuredClone(current.data), current.rev);
+    try {
+      const result = await fn();
+      await this.save(this.pending.data);
+      return result;
+    } finally {
+      this.pending = null;
+    }
+  }
+
+  // ---------------------------------------------------------------------
   // Writes (used by the sync job and by mutations)
   // ---------------------------------------------------------------------
 
   async storePlaylists(playlists: Playlist[]): Promise<void> {
     if (playlists.length === 0) return;
-
-    const pipeline = redisClient.multi();
-    for (const playlist of playlists) {
-      const playlistKey = this.key("playlist", playlist.id);
-      pipeline.hSet(playlistKey, convertToRedisPlaylist(playlist));
-      pipeline.expire(playlistKey, LIBRARY_TTL_SECONDS);
-    }
-    const indexKey = this.playlistIndexKey();
-    pipeline.sAdd(
-      indexKey,
-      playlists.map((p) => p.id),
-    );
-    pipeline.expire(indexKey, LIBRARY_TTL_SECONDS);
-
-    await pipeline.exec();
+    await this.mutate((data) => {
+      for (const playlist of playlists) {
+        // playlistType is an annotation, never stored in the library.
+        const { playlistType: _annotation, ...rest } = playlist;
+        void _annotation;
+        data.playlists[playlist.id] = rest;
+      }
+    });
   }
 
   async storeTracks(playlistId: string, tracks: Track[]): Promise<void> {
     if (tracks.length === 0) return;
-
-    const tracksKey = this.key("playlist", playlistId, "tracks");
-
-    // Clear existing sorted set once (maintains order via score).
-    await redisClient.del(tracksKey);
-
-    // Scoped to the whole call (not per chunk) so a key shared across many
-    // tracks/chunks — an album, or an artist that recurs across dozens of
-    // tracks — only gets HSET/SADD + EXPIRE issued once.
-    const writtenAlbumIds = new Set<string>();
-    const expiredKeys = new Set<string>();
-
-    for (let offset = 0; offset < tracks.length; offset += WRITE_CHUNK_SIZE) {
-      const chunk = tracks.slice(offset, offset + WRITE_CHUNK_SIZE);
-      const pipeline = redisClient.multi();
-      const sortedSetData: { score: number; value: string }[] = [];
-      const touched = new Set<string>();
-
-      chunk.forEach((track, i) => {
-        const playlistPosition = offset + i;
-
-        const trackKey = this.key("track", track.id);
-        pipeline.hSet(
-          trackKey,
-          convertToRedisTrack({ ...track, playlistPosition }),
-        );
-        touched.add(trackKey);
-
-        // Album metadata (shared across tracks, stored once). YouTube tracks
-        // carry a fabricated per-video "album" (id `${channelId}:${videoId}`)
-        // that only exists to carry the track's cover art; the id must stay
-        // unique per video or this dedupe would drop every thumbnail but
-        // the first. Consumers use `type === "youtube"` to avoid treating it
-        // as a real, browsable album.
-        const albumId = track.album?.id;
-        if (albumId) {
-          if (!writtenAlbumIds.has(albumId)) {
-            writtenAlbumIds.add(albumId);
-            const albumKey = this.key("album", albumId);
-            pipeline.hSet(albumKey, convertToRedisAlbum(track.album));
-            touched.add(albumKey);
-          }
-          const albumTracksKey = this.key("album", albumId, "tracks");
-          pipeline.sAdd(albumTracksKey, track.id);
-          touched.add(albumTracksKey);
-        }
-
-        const trackPlaylistsKey = this.key("track", track.id, "playlists");
-        pipeline.sAdd(trackPlaylistsKey, playlistId);
-        touched.add(trackPlaylistsKey);
-
-        sortedSetData.push({ score: playlistPosition, value: track.id });
-
-        for (const artistId of track.artistIds) {
-          const artistTracksKey = this.key("artist", artistId, "tracks");
-          pipeline.sAdd(artistTracksKey, track.id);
-          touched.add(artistTracksKey);
-
-          const artistPlaylistsKey = this.key("artist", artistId, "playlists");
-          pipeline.sAdd(artistPlaylistsKey, playlistId);
-          touched.add(artistPlaylistsKey);
-        }
-      });
-
-      if (sortedSetData.length > 0) {
-        pipeline.zAdd(tracksKey, sortedSetData);
-        touched.add(tracksKey);
-      }
-
-      const trackIndexKey = this.trackIndexKey();
-      pipeline.sAdd(
-        trackIndexKey,
-        chunk.map((t) => t.id),
-      );
-      touched.add(trackIndexKey);
-
-      for (const key of touched) {
-        if (expiredKeys.has(key)) continue;
-        expiredKeys.add(key);
-        pipeline.expire(key, LIBRARY_TTL_SECONDS);
-      }
-
-      await pipeline.exec();
-    }
+    await this.mutate((data) => {
+      data.playlistTrackIds[playlistId] = tracks.map((t) => t.id);
+      for (const track of tracks) data.tracks[track.id] = stripTrack(track);
+    });
   }
 
   async storeArtists(artists: Artist[]): Promise<void> {
     if (artists.length === 0) return;
-
-    const pipeline = redisClient.multi();
-    for (const artist of artists) {
-      const artistKey = this.key("artist", artist.id);
-      pipeline.hSet(artistKey, convertToRedisArtist(artist));
-      pipeline.expire(artistKey, LIBRARY_TTL_SECONDS);
-    }
-    const indexKey = this.artistIndexKey();
-    pipeline.sAdd(
-      indexKey,
-      artists.map((a) => a.id),
-    );
-    pipeline.expire(indexKey, LIBRARY_TTL_SECONDS);
-
-    await pipeline.exec();
+    await this.mutate((data) => {
+      for (const artist of artists) data.artists[artist.id] = artist;
+    });
   }
 
-  /** Appends an already-cached track to a playlist in the cache. */
+  /** Appends a track to a playlist in the cache (no-op if already there). */
   async addTrackToPlaylist(playlistId: string, track: Track): Promise<void> {
-    const tracksKey = this.key("playlist", playlistId, "tracks");
-    const existingScore = await redisClient.zScore(tracksKey, track.id);
-    if (existingScore !== null) return;
-
-    const last = await redisClient.zRangeWithScores(tracksKey, -1, -1);
-    const nextPosition = last.length > 0 ? last[0].score + 1 : 0;
-
-    const trackKey = this.key("track", track.id);
-    const trackPlaylistsKey = this.key("track", track.id, "playlists");
-    const pipeline = redisClient.multi();
-
-    pipeline.hSet(trackKey, convertToRedisTrack(track));
-    pipeline.sAdd(this.trackIndexKey(), track.id);
-    pipeline.sAdd(trackPlaylistsKey, playlistId);
-    pipeline.zAdd(tracksKey, { score: nextPosition, value: track.id });
-
-    const touched = [trackKey, this.trackIndexKey(), trackPlaylistsKey, tracksKey];
-
-    if (track.album?.id) {
-      const albumKey = this.key("album", track.album.id);
-      const albumTracksKey = this.key("album", track.album.id, "tracks");
-      pipeline.hSet(albumKey, convertToRedisAlbum(track.album));
-      pipeline.sAdd(albumTracksKey, track.id);
-      touched.push(albumKey, albumTracksKey);
-    }
-
-    for (const artistId of track.artistIds) {
-      const artistTracksKey = this.key("artist", artistId, "tracks");
-      const artistPlaylistsKey = this.key("artist", artistId, "playlists");
-      pipeline.sAdd(artistTracksKey, track.id);
-      pipeline.sAdd(artistPlaylistsKey, playlistId);
-      touched.push(artistTracksKey, artistPlaylistsKey);
-    }
-
-    touched.forEach((key) => pipeline.expire(key, LIBRARY_TTL_SECONDS));
-    await pipeline.exec();
+    await this.mutate((data) => {
+      const ids = (data.playlistTrackIds[playlistId] ??= []);
+      if (ids.includes(track.id)) return;
+      ids.push(track.id);
+      data.tracks[track.id] ??= stripTrack(track);
+    });
   }
 
   async removeTrackFromPlaylist(
     playlistId: string,
     trackId: string,
   ): Promise<void> {
-    const tracksKey = this.key("playlist", playlistId, "tracks");
-    const trackKey = this.key("track", trackId);
-    const trackPlaylistsKey = this.key("track", trackId, "playlists");
-
-    const [, , trackData, remainingPlaylists, playlistTrackIds] =
-      (await redisClient
-        .multi()
-        .zRem(tracksKey, trackId)
-        .sRem(trackPlaylistsKey, playlistId)
-        .hGetAll(trackKey)
-        .sMembers(trackPlaylistsKey)
-        .zRange(tracksKey, 0, -1)
-        .exec()) as unknown as [
-        number,
-        number,
-        RedisHash,
-        string[],
-        string[],
-      ];
-
-    const track = isNonEmptyHash(trackData)
-      ? convertFromRedisTrack(trackData)
-      : null;
-    const artistIds = track?.artistIds ?? [];
-    const albumId = track?.album.id;
-
-    const pipeline = redisClient.multi();
-
-    // Track no longer in any playlist: remove it from the library entirely.
-    if (remainingPlaylists.length === 0) {
-      pipeline.del(trackKey);
-      pipeline.sRem(this.trackIndexKey(), trackId);
-      if (albumId) pipeline.sRem(this.key("album", albumId, "tracks"), trackId);
-      for (const artistId of artistIds) {
-        pipeline.sRem(this.key("artist", artistId, "tracks"), trackId);
-      }
-    }
-
-    // Drop artist -> playlist links when the artist has no other track left
-    // in this playlist.
-    if (artistIds.length > 0 && playlistTrackIds.length > 0) {
-      const lookup = redisClient.multi();
-      playlistTrackIds.forEach((id) =>
-        lookup.hGet(this.key("track", id), "artistIds"),
+    await this.mutate((data) => {
+      const ids = data.playlistTrackIds[playlistId];
+      if (ids)
+        data.playlistTrackIds[playlistId] = ids.filter((id) => id !== trackId);
+      // Track no longer in any playlist: remove it from the library.
+      const stillListed = Object.values(data.playlistTrackIds).some((list) =>
+        list.includes(trackId),
       );
-      const raw = (await lookup.exec()) as unknown as (string | null)[];
-      const stillPresent = new Set<string>();
-      raw.forEach((value) => {
-        if (!value) return;
-        try {
-          (JSON.parse(value) as string[]).forEach((a) => stillPresent.add(a));
-        } catch {
-          // ignore corrupt entries
-        }
-      });
-      for (const artistId of artistIds) {
-        if (!stillPresent.has(artistId)) {
-          pipeline.sRem(this.key("artist", artistId, "playlists"), playlistId);
-        }
-      }
-    } else {
-      for (const artistId of artistIds) {
-        pipeline.sRem(this.key("artist", artistId, "playlists"), playlistId);
-      }
-    }
-
-    await pipeline.exec();
+      if (!stillListed) delete data.tracks[trackId];
+    });
   }
 
   /**
-   * Applies looked-up release dates to cached album hashes. Only touches
-   * albums that exist in this generation (a resync may have replaced it).
+   * Applies looked-up release dates to cached tracks' albums. Returns how
+   * many of the given albums exist in this library.
    */
   async updateAlbumReleaseDates(
-    updates: { albumId: string; releaseDate: string; source: ReleaseDateSource }[],
+    updates: {
+      albumId: string;
+      releaseDate: string;
+      source: ReleaseDateSource;
+    }[],
   ): Promise<number> {
     if (updates.length === 0) return 0;
-
-    const exists = redisClient.multi();
-    updates.forEach((u) => exists.exists(this.key("album", u.albumId)));
-    const present = (await exists.exec()) as unknown as number[];
-
-    const pipeline = redisClient.multi();
-    let applied = 0;
-    updates.forEach((u, i) => {
-      if (!present[i]) return;
-      pipeline.hSet(this.key("album", u.albumId), {
-        releaseDate: u.releaseDate,
-        releaseDateSource: u.source,
-      });
-      applied += 1;
+    const byAlbum = new Map(updates.map((u) => [u.albumId, u]));
+    const applied = new Set<string>();
+    await this.mutate((data) => {
+      for (const track of Object.values(data.tracks)) {
+        const update = track.album?.id
+          ? byAlbum.get(track.album.id)
+          : undefined;
+        if (!update) continue;
+        track.album.releaseDate = update.releaseDate;
+        track.album.releaseDateSource = update.source;
+        applied.add(update.albumId);
+      }
     });
-    if (applied > 0) await pipeline.exec();
-    return applied;
+    return applied.size;
   }
 
   // Set while background release-date lookups are queued for this user.
@@ -652,221 +652,130 @@ export class RedisService {
   }
 
   // ---------------------------------------------------------------------
-  // Reads
+  // Reads (computed in memory from the snapshot + annotations)
   // ---------------------------------------------------------------------
 
-  // Fetches album hashes for a batch of (possibly duplicate/empty) album
-  // IDs in a single pipelined round trip, deduped.
-  private async fetchAlbumsByIds(
-    albumIds: (string | undefined)[],
-  ): Promise<Map<string, Album>> {
-    const uniqueIds = Array.from(
-      new Set(albumIds.filter((id): id is string => !!id)),
-    );
-    const albumMap = new Map<string, Album>();
-    if (uniqueIds.length === 0) return albumMap;
-
-    const pipeline = redisClient.multi();
-    uniqueIds.forEach((id) => pipeline.hGetAll(this.key("album", id)));
-    const results = (await pipeline.exec()) as unknown as RedisHash[];
-
-    uniqueIds.forEach((id, index) => {
-      const data = results[index];
-      if (isNonEmptyHash(data)) albumMap.set(id, convertFromRedisAlbum(data));
-    });
-
-    return albumMap;
-  }
-
-  /**
-   * Loads and hydrates tracks (album + ownership) for the given ids,
-   * preserving the input order and skipping ids with no stored data.
-   */
-  private async loadTracks(
+  /** Copies of the given tracks with ownership overlaid, input order kept. */
+  private async hydrate(
+    snapshot: LoadedSnapshot,
     trackIds: string[],
-  ): Promise<{ id: string; index: number; track: Track }[]> {
+  ): Promise<{ index: number; track: Track }[]> {
     if (trackIds.length === 0) return [];
-
-    const pipeline = redisClient.multi();
-    trackIds.forEach((id) => pipeline.hGetAll(this.key("track", id)));
-    const [results, ownership] = await Promise.all([
-      pipeline.exec() as unknown as Promise<RedisHash[]>,
-      this.getOwnershipMap(),
-    ]);
-
-    const raw = trackIds
-      .map((id, index) => ({ id, index, data: results[index] }))
-      .filter((entry) => isNonEmptyHash(entry.data));
-
-    const albumMap = await this.fetchAlbumsByIds(
-      raw.map((entry) => entry.data.albumId),
-    );
-
-    return raw.map(({ id, index, data }) => ({
-      id,
-      index,
-      track: this.applyOwnership(
-        convertFromRedisTrack(data, albumMap.get(data.albumId)),
-        ownership,
-      ),
-    }));
+    const ownership = await this.getOwnershipMap();
+    const out: { index: number; track: Track }[] = [];
+    trackIds.forEach((id, index) => {
+      const stored = snapshot.data.tracks[id];
+      if (!stored) return;
+      const track: Track = {
+        ...stored,
+        album: { ...stored.album },
+        ownership: TrackOwnership.NOT_OWNED,
+      };
+      out.push({ index, track: this.applyOwnership(track, ownership) });
+    });
+    return out;
   }
 
   async getTrack(trackId: string): Promise<Track | null> {
-    const [entry] = await this.loadTracks([trackId]);
+    const [entry] = await this.hydrate(await this.load(), [trackId]);
     return entry?.track ?? null;
   }
 
   async getUserTracks(): Promise<Track[]> {
-    const trackIds = await redisClient.sMembers(this.trackIndexKey());
-    const tracks = (await this.loadTracks(trackIds)).map((e) => e.track);
+    const snapshot = await this.load();
+    const tracks = (
+      await this.hydrate(snapshot, Object.keys(snapshot.data.tracks))
+    ).map((e) => e.track);
     return tracks.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async getPlaylistTracks(playlistId: string): Promise<Track[]> {
-    const trackIds = await redisClient.zRange(
-      this.key("playlist", playlistId, "tracks"),
-      0,
-      -1,
-    );
-    return (await this.loadTracks(trackIds)).map(({ index, track }) => {
-      // Position from the sorted set order
+    const snapshot = await this.load();
+    const ids = snapshot.data.playlistTrackIds[playlistId] ?? [];
+    return (await this.hydrate(snapshot, ids)).map(({ index, track }) => {
       track.playlistPosition = index;
       return track;
     });
   }
 
   async getArtistTracks(artistId: string): Promise<Track[]> {
-    const trackIds = await redisClient.sMembers(
-      this.key("artist", artistId, "tracks"),
-    );
-    return (await this.loadTracks(trackIds)).map((e) => e.track);
+    const snapshot = await this.load();
+    const ids = snapshot.artistTracks.get(artistId) ?? [];
+    return (await this.hydrate(snapshot, ids)).map((e) => e.track);
   }
 
   async getAlbumTracks(albumId: string): Promise<Track[]> {
-    const trackIds = await redisClient.sMembers(
-      this.key("album", albumId, "tracks"),
-    );
-    if (trackIds.length > 0) {
-      return (await this.loadTracks(trackIds)).map((e) => e.track);
-    }
-
-    // Data synced before the album -> tracks index existed: fall back to
-    // scanning the cached library.
-    if (!this.generation) {
-      const tracks = await this.getUserTracks();
-      return tracks.filter((track) => track.album.id === albumId);
-    }
-    return [];
+    const snapshot = await this.load();
+    const ids = Object.values(snapshot.data.tracks)
+      .filter((t) => t.album?.id === albumId)
+      .map((t) => t.id);
+    return (await this.hydrate(snapshot, ids)).map((e) => e.track);
   }
 
-  // Pipelined lookup of which playlists each of the given tracks belongs to.
   async getTrackPlaylistMemberships(
     trackIds: string[],
   ): Promise<Record<string, string[]>> {
+    const snapshot = await this.load();
     const membershipMap: Record<string, string[]> = {};
-    if (trackIds.length === 0) return membershipMap;
-
-    const pipeline = redisClient.multi();
-    trackIds.forEach((trackId) =>
-      pipeline.sMembers(this.key("track", trackId, "playlists")),
-    );
-    const results = (await pipeline.exec()) as unknown as string[][];
-
-    trackIds.forEach((trackId, index) => {
-      membershipMap[trackId] = results?.[index] || [];
-    });
-
+    for (const id of trackIds) {
+      membershipMap[id] = [...(snapshot.trackPlaylists.get(id) ?? [])];
+    }
     return membershipMap;
   }
 
-  async getUserPlaylists(): Promise<Playlist[]> {
-    const playlistIds = await redisClient.sMembers(this.playlistIndexKey());
-    if (playlistIds.length === 0) return [];
-
-    const pipeline = redisClient.multi();
-    for (const playlistId of playlistIds) {
-      pipeline.hGetAll(this.key("playlist", playlistId));
-      pipeline.zCard(this.key("playlist", playlistId, "tracks"));
-    }
-    const [results, types] = await Promise.all([
-      pipeline.exec() as unknown as Promise<(RedisHash | number)[]>,
-      this.getPlaylistTypeMap(),
-    ]);
-
-    const playlists: Playlist[] = [];
-    playlistIds.forEach((_, index) => {
-      const playlistData = results[index * 2];
-      const trackCount = results[index * 2 + 1] as number;
-
-      if (isNonEmptyHash(playlistData)) {
-        const playlist = convertFromRedisPlaylist(playlistData);
-        playlists.push(
-          this.applyPlaylistType({ ...playlist, trackCount }, types),
-        );
-      }
-    });
-
-    return playlists;
-  }
-
-  async getPlaylist(playlistId: string): Promise<Playlist | null> {
-    const [playlistData, trackCount, types] = await Promise.all([
-      redisClient.hGetAll(this.key("playlist", playlistId)),
-      redisClient.zCard(this.key("playlist", playlistId, "tracks")),
-      this.getPlaylistTypeMap(),
-    ]);
-
-    if (!isNonEmptyHash(playlistData)) return null;
-
+  private playlistWithCount(
+    snapshot: LoadedSnapshot,
+    playlist: Playlist,
+    types: RedisHash,
+  ): Playlist {
     return this.applyPlaylistType(
-      { ...convertFromRedisPlaylist(playlistData), trackCount },
+      {
+        ...playlist,
+        trackCount: snapshot.data.playlistTrackIds[playlist.id]?.length ?? 0,
+      },
       types,
     );
   }
 
+  async getUserPlaylists(): Promise<Playlist[]> {
+    const snapshot = await this.load();
+    const playlists = Object.values(snapshot.data.playlists);
+    if (playlists.length === 0) return [];
+    const types = await this.getPlaylistTypeMap();
+    return playlists.map((p) => this.playlistWithCount(snapshot, p, types));
+  }
+
+  async getPlaylist(playlistId: string): Promise<Playlist | null> {
+    const snapshot = await this.load();
+    const playlist = snapshot.data.playlists[playlistId];
+    if (!playlist) return null;
+    const types = await this.getPlaylistTypeMap();
+    return this.playlistWithCount(snapshot, playlist, types);
+  }
+
   async getUserArtists(): Promise<Artist[]> {
-    const artistIds = await redisClient.sMembers(this.artistIndexKey());
-    if (artistIds.length === 0) return [];
-
-    const pipeline = redisClient.multi();
-    for (const artistId of artistIds) {
-      pipeline.hGetAll(this.key("artist", artistId));
-      pipeline.sCard(this.key("artist", artistId, "tracks"));
-    }
-    const results = (await pipeline.exec()) as unknown as (
-      | RedisHash
-      | number
-    )[];
-
-    const artists: Artist[] = [];
-    artistIds.forEach((_, index) => {
-      const artistData = results[index * 2];
-      const trackCount = results[index * 2 + 1] as number;
-
-      if (isNonEmptyHash(artistData)) {
-        artists.push({ ...convertFromRedisArtist(artistData), trackCount });
-      }
-    });
-
-    return artists;
+    const snapshot = await this.load();
+    return Object.values(snapshot.data.artists).map((artist) => ({
+      ...artist,
+      trackCount: snapshot.artistTracks.get(artist.id)?.length ?? 0,
+    }));
   }
 
   async getArtist(artistId: string): Promise<Artist | null> {
-    const [artistData, trackCount] = await Promise.all([
-      redisClient.hGetAll(this.key("artist", artistId)),
-      redisClient.sCard(this.key("artist", artistId, "tracks")),
-    ]);
-
-    if (!isNonEmptyHash(artistData)) return null;
-
-    return { ...convertFromRedisArtist(artistData), trackCount };
+    const snapshot = await this.load();
+    const artist = snapshot.data.artists[artistId];
+    if (!artist) return null;
+    return {
+      ...artist,
+      trackCount: snapshot.artistTracks.get(artistId)?.length ?? 0,
+    };
   }
 
   async getPlaylistData(playlistId: string): Promise<PlaylistData | null> {
     const playlist = await this.getPlaylist(playlistId);
     if (!playlist) return null;
 
+    const snapshot = await this.load();
     const tracks = await this.getPlaylistTracks(playlistId);
     if (tracks.length === 0) {
       return { playlist, tracks, artists: [], genres: [], totalDurationMs: 0 };
@@ -884,23 +793,14 @@ export class RedisService {
       }
     }
 
-    const uniqueArtistIds = Array.from(artistTrackCount.keys());
-    const artistPipeline = redisClient.multi();
-    uniqueArtistIds.forEach((artistId) =>
-      artistPipeline.hGetAll(this.key("artist", artistId)),
-    );
-    const artistResults = (await artistPipeline.exec()) as unknown as RedisHash[];
-
     const artists: Artist[] = [];
     const artistGenres = new Map<string, Set<string>>();
-
-    artistResults.forEach((data, index) => {
-      if (!isNonEmptyHash(data)) return;
-      const artist = convertFromRedisArtist(data);
-      const trackCount = artistTrackCount.get(uniqueArtistIds[index]) || 0;
+    for (const [artistId, trackCount] of artistTrackCount) {
+      const artist = snapshot.data.artists[artistId];
+      if (!artist) continue;
       artists.push({ ...artist, trackCount });
       artistGenres.set(artist.id, new Set(artist.genres));
-    });
+    }
 
     // Count genres by track (not by artist track count)
     const genreCount = new Map<string, number>();
@@ -922,4 +822,11 @@ export class RedisService {
 
     return { playlist, tracks, artists, genres, totalDurationMs };
   }
+}
+
+/** Library copy of a track: annotations and per-playlist fields dropped. */
+function stripTrack(track: Track): Track {
+  const { playlistPosition: _position, ...rest } = track;
+  void _position;
+  return { ...rest, ownership: TrackOwnership.NOT_OWNED };
 }

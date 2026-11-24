@@ -203,7 +203,8 @@ export function SyncModal() {
     };
 
     poll();
-    pollingIntervalRef.current = window.setInterval(poll, 1000);
+    // Every 2s: each poll costs a few Redis commands on metered plans.
+    pollingIntervalRef.current = window.setInterval(poll, 2000);
   };
 
   const checkForActiveJob = async () => {
