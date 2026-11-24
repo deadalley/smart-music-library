@@ -169,7 +169,9 @@ free tier (500k commands/month):
   dozen (plus one small write per new MusicBrainz lookup).
 - The background worker (syncs and release-year lookups share one queue and
   one worker) polls Redis every 5 minutes when idle instead of BullMQ's
-  default of every few seconds: about 600 commands a day.
+  default of every few seconds: measured at about 4k commands a day while
+  idle (around 120k a month if the server never sleeps), down from ~317k a
+  day.
 
 Libraries synced by older versions are stored per key; after upgrading,
 the app asks for one resync and cleans up the old keys. Wishlist marks and
