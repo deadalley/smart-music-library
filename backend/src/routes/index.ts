@@ -3,6 +3,7 @@ import {
   isTrackOwnership,
   PlaylistAnalysisResult,
   PlaylistType,
+  TrackDetails,
   TrackOwnership,
 } from "@smart-music-library/shared";
 import { NextFunction, Request, Response, Router } from "express";
@@ -118,6 +119,33 @@ router.delete(
       res.json({ success: true });
     },
   ),
+);
+
+// Registered after /tracks/saved and /tracks/aggregate so those keep
+// resolving to their own handlers.
+router.get(
+  "/tracks/:id",
+  withLibrary("Failed to fetch track", async (req, res, library) => {
+    const trackId = req.params.id;
+    const [track, memberships, playlists] = await Promise.all([
+      library.getTrack(trackId),
+      library.getTrackPlaylistMemberships([trackId]),
+      library.getUserPlaylists(),
+    ]);
+    if (!track) {
+      return res.status(404).json({ error: "Track not found" });
+    }
+
+    const ids = new Set(memberships[trackId] ?? []);
+    const details: TrackDetails = {
+      track,
+      playlists: playlists
+        .filter((p) => p.id !== LIKED_SONGS_PLAYLIST_ID && ids.has(p.id))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+      liked: ids.has(LIKED_SONGS_PLAYLIST_ID),
+    };
+    res.json(details);
+  }),
 );
 
 router.patch(

@@ -19,7 +19,7 @@ import {
   Tag,
 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useSettings } from "../contexts/SettingsContext";
 import { baseAPI, getApiErrorMessage } from "../services/api";
 import {
@@ -58,6 +58,7 @@ export function TrackList({
     new Set(TRACK_OWNERSHIP_OPTIONS.map((option) => option.value)),
   );
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { enabledServices } = useSettings();
   // YouTube tracks carry a placeholder "album" (just the video thumbnail),
   // so the Album column only earns its place when real albums exist.
@@ -167,9 +168,14 @@ export function TrackList({
 
             <div className="min-w-0 flex-1">
               <div className="flex gap-2 items-center">
-                <p className="font-medium truncate text-base-content group-hover:text-primary transition-colors">
+                <Link
+                  to={`/tracks/${encodeURIComponent(track.id)}`}
+                  className="font-medium truncate text-base-content group-hover:text-primary hover:text-primary transition-colors"
+                  onClick={(e) => e.stopPropagation()}
+                  title={track.name}
+                >
                   {track.name}
-                </p>
+                </Link>
                 {trackAnalysisResult && (
                   <button
                     className="btn btn-ghost btn-xs"
@@ -408,6 +414,9 @@ export function TrackList({
           data={data}
           columns={columns}
           getRowKey={(row, index) => `${row.track.id}-${index}`}
+          onRowClick={(row) =>
+            navigate(`/tracks/${encodeURIComponent(row.track.id)}`)
+          }
           renderSubRow={
             aggregatedTracks
               ? (row) => {

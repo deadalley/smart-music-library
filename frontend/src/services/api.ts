@@ -9,6 +9,7 @@ import {
   PlaylistAnalysisResult,
   PlaylistStats,
   Track,
+  TrackDetails,
   TrackAggregationResult,
 } from "@smart-music-library/shared";
 import axios from "axios";
@@ -107,6 +108,9 @@ export const baseAPI = {
   getAlbum: (albumId: string) => api.get<Album>(`/albums/${albumId}`),
   getAlbumTracks: (albumId: string) =>
     api.get<Track[]>(`/albums/${albumId}/tracks`),
+
+  getTrackDetails: (trackId: string) =>
+    api.get<TrackDetails>(`/tracks/${encodeURIComponent(trackId)}`),
 
   // Saved tracks
   getSavedTracks: () => api.get<Track[]>("/tracks/saved"),

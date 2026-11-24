@@ -13,6 +13,7 @@ import { SavedTracks } from "./pages/SavedTracks";
 import { Settings } from "./pages/Settings";
 import { Statistics } from "./pages/Statistics";
 import { DecadeView } from "./pages/DecadeView";
+import { TrackView } from "./pages/TrackView";
 import { SyncRequired } from "./pages/SyncRequired";
 import { Wishlist } from "./pages/Wishlist";
 import { Layout } from "./components/Layout";
@@ -36,6 +37,7 @@ function App() {
               <Route path="wishlist" element={<Wishlist />} />
               <Route path="statistics" element={<Statistics />} />
               <Route path="decades/:decade" element={<DecadeView />} />
+              <Route path="tracks/:id" element={<TrackView />} />
               <Route path="settings" element={<Settings />} />
             </Route>
 
