@@ -4,6 +4,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import {
   PersistJobData,
   persistUserDataJob,
+  YOUTUBE_QUOTA_MESSAGE,
 } from "../src/jobs/persistUserData";
 import { redisClient } from "../src/redis";
 import { RedisService } from "../src/services/RedisService";
@@ -94,6 +95,18 @@ describe.skipIf(!hasRedis)("sync job (Redis integration)", () => {
     expect(library.generation).toBe("job1-0");
     expect(await library.getPlaylistTracks("PL1")).toHaveLength(2);
     expect(await keysMatching(`${ROOT}:g:job2-0:*`)).toEqual([]);
+  });
+
+  it("explains a spent YouTube API quota instead of Google's raw error", async () => {
+    const yt = fakeYouTube(baseLibrary());
+    (yt as unknown as { listLikedVideos: () => Promise<never> }).listLikedVideos = async () => {
+      throw Object.assign(new Error("quota"), {
+        response: { status: 403, data: { error: { errors: [{ reason: "quotaExceeded" }] } } },
+      });
+    };
+    await expect(persistUserDataJob(fakeJob(), () => yt)).rejects.toThrow(
+      YOUTUBE_QUOTA_MESSAGE,
+    );
   });
 
   it("skips playlists that can't be read instead of failing the sync", async () => {

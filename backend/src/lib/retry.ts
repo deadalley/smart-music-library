@@ -81,6 +81,17 @@ function getRetryAfterMs(err: unknown): number | undefined {
   return undefined;
 }
 
+// The daily YouTube API quota is spent: unlike rate limits, retrying won't
+// help until it resets (midnight Pacific time).
+const QUOTA_EXHAUSTED_REASONS = new Set([
+  "quotaExceeded",
+  "dailyLimitExceeded",
+]);
+
+export function isQuotaExhausted(err: unknown): boolean {
+  return getErrorReasons(err).some((r) => QUOTA_EXHAUSTED_REASONS.has(r));
+}
+
 export function isRetryableError(err: unknown): boolean {
   const status = getErrorStatus(err);
   if (status === 429) return true;
