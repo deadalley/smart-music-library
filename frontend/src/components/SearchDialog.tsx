@@ -38,7 +38,7 @@ export function SearchDialog() {
       if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "k") return;
 
       const dialog = document.getElementById(
-        SEARCH_MODAL_ID
+        SEARCH_MODAL_ID,
       ) as HTMLDialogElement | null;
       if (!dialog || dialog.open) return;
 
@@ -127,16 +127,10 @@ export function SearchDialog() {
                       count={data.tracks.totalCount}
                     >
                       {data.tracks.items.map((track) => {
-                        const hasRealAlbum =
-                          !!track.album.id && track.album.type !== "youtube";
                         return (
                           <SearchResultRow
                             key={track.id}
-                            to={
-                              hasRealAlbum
-                                ? `/albums/${track.album.id}`
-                                : `/artists/${track.artistIds[0]}`
-                            }
+                            to={`/tracks/${encodeURIComponent(track.id)}`}
                             image={track.album.images?.[0]?.url}
                             FallbackIcon={Disc3}
                             shape="square"

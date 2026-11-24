@@ -167,8 +167,13 @@ export function Table<T>({
                   gridTemplateColumns,
                 }}
                 onClick={(e) => {
-                  // Don't trigger row click if clicking on a button or interactive element
-                  if (!(e.target as HTMLElement).closest("button")) {
+                  // Clicks on controls inside the row (links, buttons,
+                  // dropdowns, inputs) do their own thing, not the row's.
+                  if (
+                    !(e.target as HTMLElement).closest(
+                      "a, button, input, select, textarea, label, .dropdown",
+                    )
+                  ) {
                     onRowClick?.(row.original);
                   }
                 }}

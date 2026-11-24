@@ -250,3 +250,12 @@ export interface PlaylistStats extends TrackStats {
   likedShare: number; // 0-1
   overlaps: PlaylistOverlap[];
 }
+
+// Track page: a library track plus where it appears
+export interface TrackDetails {
+  track: Track;
+  /** Playlists containing the track (Liked Songs excluded), by name. */
+  playlists: Playlist[];
+  /** Whether the track is in Liked Songs. */
+  liked: boolean;
+}

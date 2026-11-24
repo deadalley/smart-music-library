@@ -531,7 +531,12 @@ export function TrackHighlightsCard({
       <li className="list-row items-center px-0">
         <span className="badge badge-ghost badge-sm">{label}</span>
         <span className="truncate min-w-0" title={track.name}>
-          {track.name}
+          <Link
+            to={`/tracks/${encodeURIComponent(track.id)}`}
+            className="hover:text-primary transition-colors"
+          >
+            {track.name}
+          </Link>
           <span className="text-base-content/50">
             {" "}
             · {track.artistNames.join(", ")}
@@ -559,7 +564,12 @@ export function TrackHighlightsCard({
                   {i + 1}
                 </span>
                 <span className="truncate min-w-0" title={track.name}>
-                  {track.name}
+                  <Link
+                    to={`/tracks/${encodeURIComponent(track.id)}`}
+                    className="hover:text-primary transition-colors"
+                  >
+                    {track.name}
+                  </Link>
                   <span className="text-base-content/50">
                     {" "}
                     · {track.artistNames.join(", ")}
