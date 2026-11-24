@@ -5,9 +5,9 @@ import {
   Track,
   TrackOwnership,
 } from "@smart-music-library/shared";
-import { Job } from "bullmq";
+import { Job, UnrecoverableError } from "bullmq";
 import { parseReleaseDateFromDescription } from "../lib/releaseDate";
-import { getErrorStatus } from "../lib/retry";
+import { getErrorStatus, isQuotaExhausted } from "../lib/retry";
 import { getCachedReleaseDates } from "../services/MusicBrainzService";
 import {
   LIKED_SONGS_PLAYLIST_ID,
@@ -29,6 +29,9 @@ import {
 // set by the uploader and is sometimes wrong — but it's the best signal
 // the official Data API exposes.
 const MIN_MUSIC_RATIO = 0.5;
+
+export const YOUTUBE_QUOTA_MESSAGE =
+  "YouTube's daily API quota for this app has been used up. Try again after midnight Pacific time.";
 
 // Playlist-level errors that mean "this one playlist can't be read" (deleted,
 // private, region-locked...) rather than "the whole sync is broken".
@@ -389,6 +392,11 @@ export async function persistUserDataJob(
     await store.deleteLibraryData().catch((cleanupError) => {
       console.error("Failed to clean up partial sync data:", cleanupError);
     });
+    // A spent daily YouTube API quota won't recover on retry today; say so
+    // plainly instead of surfacing Google's raw error.
+    if (isQuotaExhausted(error)) {
+      throw new UnrecoverableError(YOUTUBE_QUOTA_MESSAGE);
+    }
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Persist job failed: ${message}`);
   }
