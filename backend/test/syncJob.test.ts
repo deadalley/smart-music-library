@@ -132,9 +132,11 @@ describe.skipIf(!hasRedis)("sync job (Redis integration)", () => {
       .set(`${ROOT}:lastSyncedAt`, "2024-01-01T00:00:00Z")
       .exec();
 
+    // The old format isn't readable any more: it reads as empty (the app
+    // asks for a resync), but its annotations must survive that resync.
     const legacy = await RedisService.forUser(USER);
     expect(legacy.generation).toBeNull();
-    expect((await legacy.getUserTracks())[0].ownership).toBe(TrackOwnership.OWNED);
+    expect(await legacy.getUserTracks()).toEqual([]);
 
     await persistUserDataJob(fakeJob(), () => fakeYouTube(baseLibrary()));
 
@@ -146,7 +148,7 @@ describe.skipIf(!hasRedis)("sync job (Redis integration)", () => {
     expect(await redisClient.exists(`${ROOT}:tracks-index`)).toBe(0);
   });
 
-  it("keeps the album and playlist indexes consistent on add/remove", async () => {
+  it("keeps memberships, album and artist lookups consistent on add/remove", async () => {
     await persistUserDataJob(fakeJob(), () => fakeYouTube(baseLibrary()));
     const library = await RedisService.forUser(USER);
 
@@ -163,14 +165,16 @@ describe.skipIf(!hasRedis)("sync job (Redis integration)", () => {
     await library.removeTrackFromPlaylist("liked-songs", "v2");
     expect(await library.getTrack("v2")).toBeNull();
     expect(await library.getAlbumTracks(v2.album.id)).toEqual([]);
+    // v2 was ch2's only track.
     expect((await library.getArtistTracks("ch2")).map((t) => t.id)).toEqual([]);
-    expect(
-      await redisClient.sIsMember(`${ROOT}:g:${library.generation}:artist:ch2:playlists`, "PL1"),
-    ).toBe(false);
-    // ch1 still has v1 in PL1, so that link stays.
-    expect(
-      await redisClient.sIsMember(`${ROOT}:g:${library.generation}:artist:ch1:playlists`, "PL1"),
-    ).toBe(true);
+    expect((await library.getArtist("ch2"))?.trackCount).toBe(0);
+    // ch1 still has v1, in PL1 and liked songs.
+    expect((await library.getArtistTracks("ch1")).map((t) => t.id)).toEqual(["v1"]);
+    expect((await library.getPlaylist("PL1"))?.trackCount).toBe(1);
+
+    // Changes are stored, not just cached: a fresh reader sees them too.
+    const fresh = await RedisService.forUser(USER);
+    expect((await fresh.getPlaylistTracks("PL1")).map((t) => t.id)).toEqual(["v1"]);
   });
 
   it("deleteAllUserData removes everything including annotations", async () => {

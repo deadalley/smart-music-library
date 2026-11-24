@@ -44,7 +44,8 @@ export function createPersistRouter(bullService: BullService): Router {
           bullService.getLastJobStatus(userId),
         ]);
 
-      const hasData = !!meta?.lastSync;
+      // Libraries stored in the old per-key format count as "needs a sync".
+      const hasData = !!meta?.lastSync && !!meta.hasSnapshot;
       // The marker key has no TTL, so it survives after the rest of a
       // user's library data auto-expires — letting us tell "never synced"
       // apart from "synced before, but the cache has since expired".

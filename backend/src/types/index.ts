@@ -1,7 +1,6 @@
 // BullMQ types
 export enum JobQueues {
   PERSIST_USER_DATA = "smart-spotify-persist-user-data",
-  ENRICH_RELEASE_DATES = "smart-spotify-enrich-release-dates",
 }
 
 export enum Jobs {

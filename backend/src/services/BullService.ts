@@ -41,19 +41,30 @@ export interface BullServiceOptions {
   attempts?: number;
   backoffDelayMs?: number;
   processor?: (job: Job<PersistJobData>) => Promise<unknown>;
-  enrichProcessor?: (
-    job: Job<EnrichReleaseDatesJobData>,
-  ) => Promise<unknown>;
+  enrichProcessor?: (job: Job<EnrichReleaseDatesJobData>) => Promise<unknown>;
 }
 
+type AnyJobData = PersistJobData | EnrichReleaseDatesJobData;
+
+/**
+ * Worker polling settings. BullMQ's defaults (a blocking poll every 5s and a
+ * stalled-job check every 30s per worker) cost ~300k Redis commands a day
+ * while completely idle, which alone exhausts a free Upstash plan. Adding a
+ * job still wakes the blocked worker immediately, so long intervals don't
+ * delay work; they only delay recovering a job whose worker crashed.
+ */
+export const WORKER_POLL_OPTIONS = {
+  drainDelay: 300, // seconds a worker blocks waiting for jobs
+  stalledInterval: 5 * 60 * 1000,
+} as const;
+
 export class BullService {
-  private persistQueue: Queue<PersistJobData>;
-  private persistWorker?: Worker<PersistJobData>;
+  // One queue and one worker for every job type (sync, release-date
+  // lookups): each worker costs Redis commands even when idle.
+  private queue: Queue<AnyJobData>;
+  private worker?: Worker<AnyJobData>;
   private connection: IORedis;
   private workerConnection?: IORedis;
-  private enrichQueue: Queue<EnrichReleaseDatesJobData>;
-  private enrichWorker?: Worker<EnrichReleaseDatesJobData>;
-  private enrichWorkerConnection?: IORedis;
   private attempts: number;
   private backoffDelayMs: number;
 
@@ -68,13 +79,9 @@ export class BullService {
     this.attempts = attempts;
     this.backoffDelayMs = backoffDelayMs;
 
-    this.persistQueue = new Queue<PersistJobData>(JobQueues.PERSIST_USER_DATA, {
+    this.queue = new Queue<AnyJobData>(JobQueues.PERSIST_USER_DATA, {
       connection: this.connection,
     });
-    this.enrichQueue = new Queue<EnrichReleaseDatesJobData>(
-      JobQueues.ENRICH_RELEASE_DATES,
-      { connection: this.connection },
-    );
 
     processor ??= (job) =>
       persistUserDataJob(job, undefined, {
@@ -88,54 +95,48 @@ export class BullService {
       });
 
     if (startWorker) {
-      // One lookup batch at a time across all users keeps us within
-      // MusicBrainz's rate limit.
-      this.enrichWorkerConnection = createBullConnection();
-      this.enrichWorker = new Worker<EnrichReleaseDatesJobData>(
-        JobQueues.ENRICH_RELEASE_DATES,
-        enrichProcessor,
-        { connection: this.enrichWorkerConnection, concurrency: 1 },
+      this.workerConnection = createBullConnection();
+      // Concurrency 1: one sync or lookup batch at a time, which also keeps
+      // MusicBrainz lookups within its rate limit.
+      this.worker = new Worker<AnyJobData>(
+        JobQueues.PERSIST_USER_DATA,
+        (job) =>
+          job.name === Jobs.ENRICH_RELEASE_DATES
+            ? enrichProcessor(job as Job<EnrichReleaseDatesJobData>)
+            : processor(job as Job<PersistJobData>),
+        {
+          connection: this.workerConnection,
+          concurrency: 1,
+          ...WORKER_POLL_OPTIONS,
+        },
       );
-      this.enrichWorker.on("completed", (job, result) => {
+      this.setupWorkerListeners(this.worker);
+    }
+  }
+
+  private setupWorkerListeners(worker: Worker<AnyJobData>): void {
+    worker.on("completed", (job, result) => {
+      if (job.name === Jobs.ENRICH_RELEASE_DATES) {
         console.log(
           `Release-date lookup for user ${job.data.userId}:`,
           JSON.stringify(result),
         );
-      });
-      this.enrichWorker.on("failed", (job, err) => {
-        console.error(
-          `Release-date lookup failed for user ${job?.data.userId}:`,
-          err?.message,
+      } else {
+        console.log(
+          `Persist job ${job.id} completed for user ${job.data.userId}`,
         );
-      });
-
-      this.workerConnection = createBullConnection();
-      this.persistWorker = new Worker<PersistJobData>(
-        JobQueues.PERSIST_USER_DATA,
-        processor,
-        {
-          connection: this.workerConnection,
-          concurrency: 1, // Process one persist job at a time
-        },
-      );
-      this.setupWorkerListeners(this.persistWorker);
-    }
-  }
-
-  private setupWorkerListeners(worker: Worker<PersistJobData>): void {
-    worker.on("completed", (job) => {
-      console.log(`Persist job ${job.id} completed for user ${job.data.userId}`);
+      }
     });
 
     worker.on("failed", (job, err) => {
       console.error(
-        `Persist job ${job?.id} failed for user ${job?.data?.userId} (attempt ${job?.attemptsMade}):`,
+        `${job?.name === Jobs.ENRICH_RELEASE_DATES ? "Release-date lookup" : "Persist job"} ${job?.id} failed for user ${job?.data?.userId} (attempt ${job?.attemptsMade}):`,
         err?.message,
       );
     });
 
     worker.on("error", (err) => {
-      console.error("Persist worker error:", err);
+      console.error("Worker error:", err);
     });
   }
 
@@ -154,7 +155,7 @@ export class BullService {
     // Fast path: the most recently enqueued job for this user.
     const lastJobId = await redisClient.get(this.lastJobKey(userId, source));
     if (lastJobId) {
-      const job = await this.persistQueue.getJob(lastJobId);
+      const job = await this.queue.getJob(lastJobId);
       if (job) {
         const state = await job.getState();
         if ((UNFINISHED_STATES as string[]).includes(state)) return lastJobId;
@@ -162,9 +163,13 @@ export class BullService {
       }
     }
 
-    const jobs = await this.persistQueue.getJobs(UNFINISHED_STATES);
+    const jobs = await this.queue.getJobs(UNFINISHED_STATES);
+    // The queue also holds release-date lookups; only syncs count here.
     const userJob = jobs.find(
-      (job) => job?.data.userId === userId && job.data.source === source,
+      (job) =>
+        job?.name === Jobs.PERSIST_USER_DATA &&
+        job.data.userId === userId &&
+        job.data.source === source,
     );
     return userJob?.id ?? null;
   }
@@ -182,7 +187,7 @@ export class BullService {
 
   async getJobStatus(jobId: string): Promise<JobProgress | null> {
     try {
-      const job = await this.persistQueue.getJob(jobId);
+      const job = await this.queue.getJob(jobId);
       if (!job) return null;
 
       const state = await job.getState();
@@ -226,11 +231,8 @@ export class BullService {
   }
 
   async cleanup(): Promise<void> {
-    await this.persistWorker?.close();
-    await this.enrichWorker?.close();
-    await this.persistQueue.close();
-    await this.enrichQueue.close();
-    this.enrichWorkerConnection?.disconnect();
+    await this.worker?.close();
+    await this.queue.close();
     this.workerConnection?.disconnect();
     this.connection.disconnect();
   }
@@ -259,7 +261,7 @@ export class BullService {
       const existing = await this.getActiveJob(userId, source);
       if (existing) return { jobId: existing, alreadyRunning: true };
 
-      const job: Job<PersistJobData> = await this.persistQueue.add(
+      const job = await this.queue.add(
         Jobs.PERSIST_USER_DATA,
         { userId, accessToken, refreshToken, source },
         {
@@ -304,7 +306,7 @@ export class BullService {
   private async enqueueEnrichment(data: EnrichReleaseDatesJobData) {
     // No retries: a failed batch clears the pending flag, and the next sync
     // picks up where the cache left off.
-    await this.enrichQueue.add(Jobs.ENRICH_RELEASE_DATES, data, {
+    await this.queue.add(Jobs.ENRICH_RELEASE_DATES, data, {
       removeOnComplete: { count: 100 },
       removeOnFail: { count: 100 },
     });

@@ -159,6 +159,22 @@ deployment to MusicBrainz, or `MUSICBRAINZ_ENABLED=false` to turn lookups off.
 
 - `GET /api/health` - Liveness check (pings Redis)
 
+## Redis usage
+
+The app is designed to fit command-metered Redis plans such as Upstash's
+free tier (500k commands/month):
+
+- Each synced library is stored as one compressed snapshot, cached in
+  memory, so a page view costs a handful of commands and a full sync a few
+  dozen (plus one small write per new MusicBrainz lookup).
+- The background worker (syncs and release-year lookups share one queue and
+  one worker) polls Redis every 5 minutes when idle instead of BullMQ's
+  default of every few seconds: about 600 commands a day.
+
+Libraries synced by older versions are stored per key; after upgrading,
+the app asks for one resync and cleans up the old keys. Wishlist marks and
+playlist types are kept.
+
 ## Tests
 
 ```bash
